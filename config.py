@@ -54,12 +54,15 @@ STANDARD_SCORING: ScoringWeights = {
 # Season configuration
 # ---------------------------------------------------------------------------
 
-TRAINING_SEASONS: list[int] = list(range(2020, 2025))  # 2020–2024 inclusive
+TRAINING_SEASONS: list[int] = list(range(2017, 2025))  # 2017–2024 inclusive (expanded from 2020)
 PROJECTION_SEASON: int = 2025
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+
+# Feature matrix schema version — bump when adding/removing columns to auto-invalidate cache
+_FEATURE_VERSION: str = "v3"
 
 PROJECT_ROOT = Path(__file__).parent
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
@@ -212,6 +215,11 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "sophomore_flag",
         "weekly_fpts_cv",
         "boom_rate",
+        # QB coupling + vacated shares
+        "qb_epa_per_dropback",
+        "team_vacated_carry_share",
+        "team_vacated_target_share",
+        "top_departed_target_share",
     ],
     "WR": [
         "target_share",
@@ -239,6 +247,13 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "sophomore_flag",
         "weekly_fpts_cv",
         "consistency_score",
+        # QB coupling + vacated shares + top-down
+        "qb_epa_per_dropback",
+        "qb_cpoe",
+        "qb_changed",
+        "team_vacated_target_share",
+        "top_departed_target_share",
+        "topdown_fpts_pg",
     ],
     "TE": [
         "target_share",
@@ -259,6 +274,12 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "context_delta_pace",
         "years_in_league",
         "weekly_fpts_cv",
+        # QB coupling + vacated shares + top-down
+        "qb_epa_per_dropback",
+        "qb_changed",
+        "team_vacated_target_share",
+        "top_departed_target_share",
+        "topdown_fpts_pg",
     ],
 }
 
@@ -276,6 +297,20 @@ TD_REGRESSION_WEIGHT: float = 0.55
 # Catch rate mean reversion weight for combination stage
 CATCH_RATE_REGRESSION_WEIGHT: float = 0.30
 
+# Per-metric regression weights for the two-stage regressed efficiency approach
+# Higher weight = stronger pull toward positional mean (for noisier metrics)
+EFFICIENCY_REGRESSION_WEIGHTS: dict[str, float] = {
+    "yards_per_target":       0.30,
+    "ypc":                    0.30,
+    "pass_yards_per_attempt": 0.25,
+    "rec_td_rate":            0.55,
+    "rush_td_rate":           0.55,
+    "pass_td_rate":           0.50,
+}
+
+# Default blend weight for HybridProjectionModel (single-stage share)
+DEFAULT_BLEND_WEIGHT: float = 0.55
+
 # Volume stage feature sets (predicts per-game opportunity volume)
 VOLUME_FEATURES: dict[str, list[str]] = {
     "QB": [
@@ -287,18 +322,21 @@ VOLUME_FEATURES: dict[str, list[str]] = {
         "team_changed", "context_delta_pace", "rush_share_delta",
         "target_share_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
+        "qb_epa_per_dropback", "team_vacated_carry_share", "team_vacated_target_share",
     ],
     "WR": [
         "target_share", "air_yard_share", "wopr", "snap_percentage",
         "team_pace", "team_pass_rate", "team_changed", "context_delta_pace",
         "target_share_delta", "wopr_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
+        "qb_epa_per_dropback", "qb_changed", "team_vacated_target_share", "top_departed_target_share",
     ],
     "TE": [
         "target_share", "air_yard_share", "snap_percentage", "team_pace",
         "team_pass_rate", "team_changed", "context_delta_pace",
         "target_share_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
+        "qb_epa_per_dropback", "qb_changed", "team_vacated_target_share",
     ],
 }
 

@@ -45,6 +45,7 @@ from config import (
     CV_GAP,
     CV_N_SPLITS,
     EFFICIENCY_FEATURES,
+    EFFICIENCY_REGRESSION_WEIGHTS,
     EFFICIENCY_RIDGE_ALPHA_GRID,
     POSITIONS,
     PPR_SCORING,
@@ -71,7 +72,7 @@ VOLUME_TARGETS: dict[str, list[str]] = {
 
 EFFICIENCY_TARGETS: dict[str, list[str]] = {
     "QB": ["pass_yards_per_attempt", "pass_td_rate"],
-    "RB": ["yards_per_target", "rec_td_rate", "rush_td_rate"],
+    "RB": ["ypc", "yards_per_target", "rec_td_rate", "rush_td_rate"],
     "WR": ["yards_per_target", "rec_td_rate"],
     "TE": ["yards_per_target", "rec_td_rate"],
 }
@@ -79,7 +80,7 @@ EFFICIENCY_TARGETS: dict[str, list[str]] = {
 # All target columns that need to be shifted in build_yoy_pairs
 ALL_RATE_TARGET_COLS: list[str] = [
     "targets_per_game", "carries_per_game", "dropbacks_per_game",
-    "yards_per_target", "rec_td_rate", "rush_td_rate",
+    "yards_per_target", "ypc", "rec_td_rate", "rush_td_rate",
     "pass_yards_per_attempt", "pass_td_rate",
     "catch_rate",
 ]
@@ -186,6 +187,8 @@ class TwoStageProjectionModel:
         # Mean TD rates and catch rates computed from training data
         self._mean_td_rates: dict[str, dict[str, float]] = {}
         self._mean_catch_rates: dict[str, float] = {}
+        # Positional medians for all efficiency targets (for regressed efficiency)
+        self._positional_means: dict[str, dict[str, float]] = {}
         self._fitted_age_params: dict | None = None
 
     # ------------------------------------------------------------------
@@ -197,6 +200,7 @@ class TwoStageProjectionModel:
         yoy_df: pd.DataFrame,
         target: str = "next_fpts",
         fit_age: bool = True,
+        use_ridge_efficiency: bool = False,
     ) -> "TwoStageProjectionModel":
         """
         Fit volume and efficiency models for all positions.
@@ -207,6 +211,9 @@ class TwoStageProjectionModel:
             YoY pairs. Must contain all VOLUME_FEATURES, EFFICIENCY_FEATURES,
             and 'next_{target_col}' columns (created by build_yoy_pairs with
             extra_target_cols=ALL_RATE_TARGET_COLS).
+        use_ridge_efficiency : bool
+            If True, fit Ridge models for the efficiency stage (noisy, not recommended).
+            If False (default), use regressed historical rates — much more stable.
         """
         if "position" not in yoy_df.columns:
             raise ValueError("yoy_df must have a 'position' column.")
@@ -245,23 +252,34 @@ class TwoStageProjectionModel:
                     self._volume_models[pos][vol_target] = model
                     print(f"    vol/{vol_target}: alpha={alpha}")
 
-            # ----- Efficiency stage -----
-            self._efficiency_models[pos] = {}
-            for eff_target in EFFICIENCY_TARGETS.get(pos, []):
-                shifted_col = f"next_{eff_target}"
-                model, alpha = _fit_model(
-                    pos_df,
-                    feature_cols=EFFICIENCY_FEATURES.get(pos, []),
-                    target_col=shifted_col,
-                    alpha_grid=EFFICIENCY_RIDGE_ALPHA_GRID,
-                    max_season=max_season,
-                    label=f"{pos}/efficiency/{eff_target}",
-                )
-                if model is not None:
-                    self._efficiency_models[pos][eff_target] = model
-                    print(f"    eff/{eff_target}: alpha={alpha}")
+            # ----- Positional medians for all efficiency metrics -----
+            self._positional_means[pos] = {}
+            for eff_col in EFFICIENCY_TARGETS.get(pos, []):
+                if eff_col in pos_df.columns:
+                    med = float(pos_df[eff_col].dropna().median())
+                    if not np.isnan(med):
+                        self._positional_means[pos][eff_col] = med
 
-            # ----- TD rate means (from training data, computed per position) -----
+            # ----- Efficiency stage (Ridge, optional) -----
+            self._efficiency_models[pos] = {}
+            if use_ridge_efficiency:
+                for eff_target in EFFICIENCY_TARGETS.get(pos, []):
+                    shifted_col = f"next_{eff_target}"
+                    model, alpha = _fit_model(
+                        pos_df,
+                        feature_cols=EFFICIENCY_FEATURES.get(pos, []),
+                        target_col=shifted_col,
+                        alpha_grid=EFFICIENCY_RIDGE_ALPHA_GRID,
+                        max_season=max_season,
+                        label=f"{pos}/efficiency/{eff_target}",
+                    )
+                    if model is not None:
+                        self._efficiency_models[pos][eff_target] = model
+                        print(f"    eff/{eff_target}: alpha={alpha}")
+            else:
+                print(f"    eff: using regressed historical rates (use_ridge_efficiency=False)")
+
+            # ----- TD rate means (for legacy _predict_efficiency_ridge) -----
             self._mean_td_rates[pos] = {}
             for td_col in ["rec_td_rate", "rush_td_rate", "pass_td_rate"]:
                 if td_col in pos_df.columns:
@@ -293,8 +311,33 @@ class TwoStageProjectionModel:
             preds[vol_target] = np.maximum(0.0, raw)
         return preds
 
-    def _predict_efficiency(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
-        """Return {eff_target: array_of_predictions} for all efficiency targets, with mean reversion."""
+    def _regressed_efficiency(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """
+        Return per-player efficiency estimates via positional median regression.
+
+        For each efficiency metric:
+          regressed = reg_weight × positional_median + (1 - reg_weight) × player_historical_rate
+
+        Regression weights are from EFFICIENCY_REGRESSION_WEIGHTS in config.
+        Higher weights pull more strongly toward the mean (used for noisier metrics like TD rates).
+        Missing player values fall back to the positional median.
+        """
+        preds = {}
+        n = len(features_df)
+        for eff_col in EFFICIENCY_TARGETS.get(pos, []):
+            reg_w = EFFICIENCY_REGRESSION_WEIGHTS.get(eff_col, 0.40)
+            pos_mean = self._positional_means.get(pos, {}).get(eff_col, np.nan)
+            if np.isnan(pos_mean):
+                continue
+            if eff_col in features_df.columns:
+                player_rate = features_df[eff_col].fillna(pos_mean).values.astype(float)
+            else:
+                player_rate = np.full(n, pos_mean)
+            preds[eff_col] = np.maximum(0.0, reg_w * pos_mean + (1 - reg_w) * player_rate)
+        return preds
+
+    def _predict_efficiency_ridge(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Ridge-based efficiency predictions (kept for comparison; unreliable due to small samples)."""
         preds = {}
         for eff_target, model in self._efficiency_models.get(pos, {}).items():
             feat_cols = [f for f in EFFICIENCY_FEATURES.get(pos, []) if f in features_df.columns]
@@ -345,7 +388,7 @@ class TwoStageProjectionModel:
         elif pos == "RB":
             cpg = vol_preds.get("carries_per_game", np.zeros(n))
             tpg = vol_preds.get("targets_per_game", np.zeros(n))
-            ypc = eff_preds.get("yards_per_target", np.zeros(n))  # fallback; ideally have ypc
+            ypc = eff_preds.get("ypc", np.zeros(n))
             rush_td_rate = eff_preds.get("rush_td_rate", np.zeros(n))
             yards_per_tgt = eff_preds.get("yards_per_target", np.zeros(n))
             rec_td_rate = eff_preds.get("rec_td_rate", np.zeros(n))
@@ -405,7 +448,7 @@ class TwoStageProjectionModel:
             n = len(pos_df)
 
             vol_preds = self._predict_volume(pos, pos_df)
-            eff_preds = self._predict_efficiency(pos, pos_df)
+            eff_preds = self._regressed_efficiency(pos, pos_df)
 
             if not vol_preds and not eff_preds:
                 continue
@@ -499,7 +542,7 @@ class TwoStageProjectionModel:
 
             n = len(pos_test)
             vol_preds = bt_model._predict_volume(pos, pos_test)
-            eff_preds = bt_model._predict_efficiency(pos, pos_test)
+            eff_preds = bt_model._regressed_efficiency(pos, pos_test)
 
             if not vol_preds and not eff_preds:
                 continue

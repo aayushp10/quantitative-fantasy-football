@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from config import (
+    _FEATURE_VERSION,
     CACHE_DIR,
     MIN_DROPBACKS_QB,
     MIN_TARGETS_TE,
@@ -43,8 +44,10 @@ from features.context import build_context_factors, get_team_context
 from features.efficiency import build_efficiency_factors
 from features.opportunity import build_opportunity_factors
 from features.pedigree import build_pedigree_features
+from features.qb_coupling import build_qb_coupling_features
 from features.situation import build_situation_features
 from features.trend import detect_trends
+from features.vacated import assign_vacated_shares_to_players, compute_vacated_shares
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +213,7 @@ def _coalesce_suffixed_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _feature_matrix_cache_path(seasons: list[int]):
     seasons_key = "_".join(str(s) for s in sorted(seasons))
-    return CACHE_DIR / f"feature_matrix_{seasons_key}.parquet"
+    return CACHE_DIR / f"feature_matrix_{seasons_key}_{_FEATURE_VERSION}.parquet"
 
 
 def assemble_feature_matrix(
@@ -313,6 +316,15 @@ def assemble_feature_matrix(
         merged = merged.merge(trend, on=trend_keys, how="left")
         merged = _coalesce_suffixed_columns(merged)
 
+    # --- QB coupling features (team-level; must precede top-down) ---
+    print("  Computing QB coupling features...")
+    try:
+        qb_coupling = build_qb_coupling_features(pbp)
+        merged = merged.merge(qb_coupling, on=["team", "season"], how="left")
+        merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    QB coupling features failed: {e}")
+
     # --- Situation change features ---
     print("  Computing situation change features...")
     try:
@@ -334,6 +346,16 @@ def assemble_feature_matrix(
                     merged.loc[tc_mask, old_col] = merged.loc[tc_mask, new_col]
     except Exception as e:
         print(f"    Situation features failed: {e}")
+
+    # --- Vacated share features (reads target_share/rush_share from merged) ---
+    print("  Computing vacated share features...")
+    try:
+        vacated_team = compute_vacated_shares(merged, rosters)
+        vacated_player = assign_vacated_shares_to_players(vacated_team, rosters, merged)
+        merged = merged.merge(vacated_player, on=join_keys_player, how="left")
+        merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    Vacated share features failed: {e}")
 
     # --- Pedigree features (draft capital + experience) ---
     print("  Computing pedigree features...")
@@ -409,6 +431,22 @@ def assemble_feature_matrix(
         ]
         merged = merged.merge(rate_agg[rate_cols], on=join_keys_player, how="left")
         merged = _coalesce_suffixed_columns(merged)
+
+    # --- Top-down team constraint features (requires qb_coupling in matrix) ---
+    print("  Computing top-down team constraint features...")
+    try:
+        from models.team_constraint import build_topdown_features
+        topdown_frames = []
+        for s in seasons:
+            td = build_topdown_features(merged[merged["season"] == s], target_season=s + 1)
+            if td is not None and not td.empty:
+                topdown_frames.append(td)
+        if topdown_frames:
+            topdown = pd.concat(topdown_frames, ignore_index=True)
+            merged = merged.merge(topdown, on=join_keys_player, how="left")
+            merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    Top-down features failed: {e}")
 
     # --- Player metadata ---
     meta = _get_player_meta(rosters)

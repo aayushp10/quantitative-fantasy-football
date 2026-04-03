@@ -572,3 +572,255 @@ class TestBuildConsistencyFeatures:
         assert result["weekly_fpts_cv"].iloc[0] == 0.0  # zero variance
         assert pd.isna(result["boom_rate"].iloc[0])
         assert pd.isna(result["bust_rate"].iloc[0])
+
+
+# ---------------------------------------------------------------------------
+# Vacated share tests
+# ---------------------------------------------------------------------------
+
+class TestComputeVacatedShares:
+    @pytest.fixture
+    def feature_matrix_with_shares(self):
+        """Feature matrix with target_share and rush_share for two seasons."""
+        return pd.DataFrame({
+            "player_id":    ["wr1",  "wr2",  "wr1",  "wr3"],
+            "team":         ["KC",   "KC",   "KC",   "NE"],
+            "season":       [2022,   2022,   2023,   2022],
+            "target_share": [0.30,   0.25,   0.28,   0.20],
+            "rush_share":   [0.0,    0.0,    0.0,    0.0],
+            "games_played": [17,     17,     17,     17],
+        })
+
+    @pytest.fixture
+    def rosters_with_departure(self):
+        """wr2 was on KC in 2022 but left — not on KC in 2023."""
+        return pd.DataFrame({
+            "player_id": ["wr1",  "wr2",  "wr1",  "wr3",  "wr2"],
+            "team":      ["KC",   "KC",   "KC",   "NE",   "BUF"],
+            "season":    [2022,   2022,   2023,   2022,   2023],
+        })
+
+    def test_departed_player_share_counted(self, feature_matrix_with_shares, rosters_with_departure):
+        from features.vacated import compute_vacated_shares
+
+        result = compute_vacated_shares(feature_matrix_with_shares, rosters_with_departure)
+        kc_2022 = result[(result["team"] == "KC") & (result["season"] == 2022)]
+        assert len(kc_2022) == 1
+        # wr2 left KC with target_share=0.25 and full 17 games → vacated = 0.25 * 1.0 = 0.25
+        assert abs(kc_2022["vacated_target_share"].iloc[0] - 0.25) < 0.01
+
+    def test_stayer_not_counted(self, feature_matrix_with_shares, rosters_with_departure):
+        from features.vacated import compute_vacated_shares
+
+        result = compute_vacated_shares(feature_matrix_with_shares, rosters_with_departure)
+        # wr1 stayed on KC from 2022 → 2023, should not be in vacated shares
+        kc_2022 = result[(result["team"] == "KC") & (result["season"] == 2022)]
+        # Only wr2 departed, so top_departed = wr2's share (0.25), not wr1's (0.30)
+        assert abs(kc_2022["top_departed_target_share"].iloc[0] - 0.25) < 0.01
+
+    def test_availability_weighting(self):
+        """A player who played only 8 games vacates half their share."""
+        from features.vacated import compute_vacated_shares
+
+        fm = pd.DataFrame({
+            "player_id":    ["wr_part", "wr_part"],
+            "team":         ["MIA",     "BUF"],
+            "season":       [2022,      2023],
+            "target_share": [0.30,      0.20],
+            "rush_share":   [0.0,       0.0],
+            "games_played": [8,         17],
+        })
+        rosters = pd.DataFrame({
+            "player_id": ["wr_part", "wr_part"],
+            "team":      ["MIA",     "BUF"],
+            "season":    [2022,      2023],
+        })
+        result = compute_vacated_shares(fm, rosters)
+        mia = result[(result["team"] == "MIA") & (result["season"] == 2022)]
+        assert len(mia) == 1
+        # 8/17 ≈ 0.471 availability weight → vacated = 0.30 * (8/17) ≈ 0.141
+        expected = 0.30 * (8 / 17)
+        assert abs(mia["vacated_target_share"].iloc[0] - expected) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# QB coupling feature tests
+# ---------------------------------------------------------------------------
+
+class TestBuildQbQualityByTeam:
+    @pytest.fixture
+    def qb_pbp(self):
+        """
+        Two QBs on KC in 2022: QB_A has 8 dropbacks, QB_B has 4.
+        QB_A is the primary QB.
+        """
+        plays = []
+        # QB_A: 8 dropbacks (pass attempts)
+        for i in range(8):
+            plays.append({
+                "passer_player_id": "QB_A",
+                "posteam": "KC",
+                "season": 2022,
+                "week": 1 + i,
+                "pass_attempt": 1,
+                "sack": 0,
+                "qb_scramble": 0,
+                "epa": 0.3,
+                "cpoe": 5.0,
+                "air_yards": 10.0,
+                "pass_touchdown": 0,
+                "complete_pass": 1,
+                "incomplete_pass": 0,
+            })
+        # QB_B: 4 dropbacks
+        for j in range(4):
+            plays.append({
+                "passer_player_id": "QB_B",
+                "posteam": "KC",
+                "season": 2022,
+                "week": 1 + j,
+                "pass_attempt": 1,
+                "sack": 0,
+                "qb_scramble": 0,
+                "epa": 0.1,
+                "cpoe": 2.0,
+                "air_yards": 8.0,
+                "pass_touchdown": 0,
+                "complete_pass": 1,
+                "incomplete_pass": 0,
+            })
+        return pd.DataFrame(plays)
+
+    @pytest.fixture
+    def qb_change_pbp(self, qb_pbp):
+        """Add a 2023 season where KC's primary QB changed to QB_C."""
+        extra = []
+        for i in range(10):
+            extra.append({
+                "passer_player_id": "QB_C",
+                "posteam": "KC",
+                "season": 2023,
+                "week": 1 + i,
+                "pass_attempt": 1,
+                "sack": 0,
+                "qb_scramble": 0,
+                "epa": 0.4,
+                "cpoe": 6.0,
+                "air_yards": 11.0,
+                "pass_touchdown": 0,
+                "complete_pass": 1,
+                "incomplete_pass": 0,
+            })
+        return pd.concat([qb_pbp, pd.DataFrame(extra)], ignore_index=True)
+
+    def test_primary_qb_selected_by_dropbacks(self, qb_pbp):
+        from features.qb_coupling import build_qb_quality_by_team
+
+        result = build_qb_quality_by_team(qb_pbp)
+        kc_2022 = result[(result["team"] == "KC") & (result["season"] == 2022)]
+        assert len(kc_2022) == 1
+        assert kc_2022["primary_qb_id"].iloc[0] == "QB_A"
+
+    def test_qb_change_detected(self, qb_change_pbp):
+        from features.qb_coupling import build_qb_coupling_features
+
+        result = build_qb_coupling_features(qb_change_pbp)
+        kc_2022 = result[(result["team"] == "KC") & (result["season"] == 2022)]
+        assert len(kc_2022) == 1
+        assert kc_2022["qb_changed"].iloc[0] == 1
+
+    def test_output_columns(self, qb_pbp):
+        from features.qb_coupling import build_qb_coupling_features
+
+        result = build_qb_coupling_features(qb_pbp)
+        required = {"team", "season", "qb_epa_per_dropback"}
+        assert required.issubset(set(result.columns))
+
+
+# ---------------------------------------------------------------------------
+# Regressed efficiency tests
+# ---------------------------------------------------------------------------
+
+class TestRegressedEfficiency:
+    @pytest.fixture
+    def minimal_yoy(self):
+        """Minimal YoY DataFrame with WR efficiency columns for training."""
+        np.random.seed(42)
+        n = 60
+        return pd.DataFrame({
+            "player_id": [f"p{i}" for i in range(n)],
+            "season": [2020 + i // 20 for i in range(n)],
+            "position": ["WR"] * n,
+            "yards_per_target": np.random.uniform(5.0, 12.0, n),
+            "rec_td_rate": np.random.uniform(0.02, 0.12, n),
+            "next_fpts": np.random.uniform(50, 250, n),
+            "next_yards_per_target": np.random.uniform(5.0, 12.0, n),
+            "next_rec_td_rate": np.random.uniform(0.02, 0.12, n),
+            "games_played": [16] * n,
+        })
+
+    def test_output_between_player_and_mean(self, minimal_yoy):
+        from models.two_stage import TwoStageProjectionModel
+
+        model = TwoStageProjectionModel(age_adjust=False)
+        model.train(minimal_yoy, fit_age=False, use_ridge_efficiency=False)
+
+        test_row = pd.DataFrame({
+            "player_id": ["test_player"],
+            "yards_per_target": [10.0],  # above average
+            "rec_td_rate": [0.10],
+            "games_played": [16],
+        })
+
+        preds = model._regressed_efficiency("WR", test_row)
+        pos_mean = model._positional_means["WR"]["yards_per_target"]
+
+        # Prediction must be between player value and mean (blended)
+        lo = min(10.0, pos_mean)
+        hi = max(10.0, pos_mean)
+        assert lo <= preds["yards_per_target"][0] <= hi + 0.01
+
+    def test_missing_values_fall_back_to_mean(self, minimal_yoy):
+        from models.two_stage import TwoStageProjectionModel
+
+        model = TwoStageProjectionModel(age_adjust=False)
+        model.train(minimal_yoy, fit_age=False, use_ridge_efficiency=False)
+
+        test_row = pd.DataFrame({
+            "player_id": ["test_player"],
+            "yards_per_target": [float("nan")],  # missing
+            "rec_td_rate": [float("nan")],
+            "games_played": [16],
+        })
+
+        preds = model._regressed_efficiency("WR", test_row)
+        pos_mean_ypt = model._positional_means["WR"]["yards_per_target"]
+        # NaN player rate → fill with pos_mean → regressed = pos_mean (fully at mean)
+        assert abs(preds["yards_per_target"][0] - pos_mean_ypt) < 0.01
+
+    def test_td_rate_heavily_regressed(self, minimal_yoy):
+        from models.two_stage import TwoStageProjectionModel
+        from config import EFFICIENCY_REGRESSION_WEIGHTS
+
+        model = TwoStageProjectionModel(age_adjust=False)
+        model.train(minimal_yoy, fit_age=False, use_ridge_efficiency=False)
+
+        pos_mean_td = model._positional_means["WR"]["rec_td_rate"]
+        player_td = 0.12  # high TD rate player
+
+        test_row = pd.DataFrame({
+            "player_id": ["test_player"],
+            "yards_per_target": [8.0],
+            "rec_td_rate": [player_td],
+            "games_played": [16],
+        })
+
+        preds = model._regressed_efficiency("WR", test_row)
+        reg_w = EFFICIENCY_REGRESSION_WEIGHTS["rec_td_rate"]  # should be 0.55
+        expected = reg_w * pos_mean_td + (1 - reg_w) * player_td
+
+        assert abs(preds["rec_td_rate"][0] - expected) < 0.001
+        # With 0.55 regression weight, prediction should be closer to mean than to player value
+        dist_to_mean = abs(preds["rec_td_rate"][0] - pos_mean_td)
+        dist_to_player = abs(preds["rec_td_rate"][0] - player_td)
+        assert dist_to_mean < dist_to_player
