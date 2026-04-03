@@ -38,9 +38,12 @@ from data.loader import (
     load_weekly,
 )
 from data.cleaning import clean_pbp, clean_rosters, clean_weekly
-from features.context import build_context_factors
+from features.consistency import build_consistency_features
+from features.context import build_context_factors, get_team_context
 from features.efficiency import build_efficiency_factors
 from features.opportunity import build_opportunity_factors
+from features.pedigree import build_pedigree_features
+from features.situation import build_situation_features
 from features.trend import detect_trends
 
 
@@ -78,9 +81,14 @@ def _compute_fpts_per_game(weekly: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _get_player_meta(rosters: pd.DataFrame) -> pd.DataFrame:
-    """Extract (player_id, season, position, age, player_name, team) from rosters."""
+    """Extract player metadata from rosters, including draft capital columns for pedigree features."""
     keep_cols = ["player_id", "season"]
-    optional = ["position", "age", "player_name", "full_name", "team", "depth_chart_position"]
+    optional = [
+        "position", "age", "player_name", "full_name", "team",
+        "depth_chart_position",
+        # Draft/experience columns needed by pedigree module
+        "draft_number", "draft_round", "years_exp", "entry_year",
+    ]
 
     cols = keep_cols + [c for c in optional if c in rosters.columns]
     meta = rosters[cols].drop_duplicates(subset=["player_id", "season"]).copy()
@@ -126,18 +134,30 @@ def _apply_thresholds(df: pd.DataFrame) -> pd.DataFrame:
 # YoY pair construction
 # ---------------------------------------------------------------------------
 
-def build_yoy_pairs(feature_matrix: pd.DataFrame) -> pd.DataFrame:
+def build_yoy_pairs(
+    feature_matrix: pd.DataFrame,
+    extra_target_cols: list[str] | None = None,
+) -> pd.DataFrame:
     """
     Create (season N features) → (season N+1 target) pairs per player.
 
     The most recent season in the matrix has features but no target;
     it's used for projection only, not training.
 
+    Parameters
+    ----------
+    feature_matrix : pd.DataFrame
+        Unified feature matrix with player_id, season, fpts_per_game columns.
+    extra_target_cols : list[str] | None
+        Additional columns to shift forward as targets (e.g. rate stats for
+        the two-stage model). Each col creates a 'next_{col}' column.
+        Columns missing from feature_matrix are silently skipped.
+
     Returns
     -------
     pd.DataFrame
-        feature_matrix rows with an added 'next_fpts' column (season N+1
-        fpts_per_game). Rows where next_fpts is NaN are dropped.
+        feature_matrix rows with 'next_fpts' (and optionally 'next_{col}' for
+        each extra_target_cols entry). Rows where next_fpts is NaN are dropped.
     """
     if "player_id" not in feature_matrix.columns or "season" not in feature_matrix.columns:
         raise ValueError("feature_matrix must have 'player_id' and 'season' columns.")
@@ -148,6 +168,12 @@ def build_yoy_pairs(feature_matrix: pd.DataFrame) -> pd.DataFrame:
     # Shift fpts_per_game within each player group
     fm["next_fpts"] = fm.groupby("player_id", observed=True)["fpts_per_game"].shift(-1)
     fm["next_season"] = fm.groupby("player_id", observed=True)["season"].shift(-1)
+
+    # Shift any additional target columns requested by two-stage model
+    if extra_target_cols:
+        for col in extra_target_cols:
+            if col in fm.columns:
+                fm[f"next_{col}"] = fm.groupby("player_id", observed=True)[col].shift(-1)
 
     # Only keep rows where the next season is exactly current + 1
     # (avoids bridging gaps when a player misses a season)
@@ -287,6 +313,46 @@ def assemble_feature_matrix(
         merged = merged.merge(trend, on=trend_keys, how="left")
         merged = _coalesce_suffixed_columns(merged)
 
+    # --- Situation change features ---
+    print("  Computing situation change features...")
+    try:
+        team_ctx = get_team_context(pbp)
+        situation = build_situation_features(rosters, team_ctx)
+        merged = merged.merge(situation, on=join_keys_player, how="left")
+        merged = _coalesce_suffixed_columns(merged)
+
+        # For team-change players, replace old team context with destination team context
+        # so the Ridge model sees the environment the player is entering, not leaving
+        if "team_changed" in merged.columns:
+            tc_mask = merged["team_changed"] == 1
+            for old_col, new_col in [
+                ("team_pace", "new_team_pace"),
+                ("team_pass_rate", "new_team_pass_rate"),
+                ("team_offensive_epa", "new_team_offensive_epa"),
+            ]:
+                if new_col in merged.columns and old_col in merged.columns:
+                    merged.loc[tc_mask, old_col] = merged.loc[tc_mask, new_col]
+    except Exception as e:
+        print(f"    Situation features failed: {e}")
+
+    # --- Pedigree features (draft capital + experience) ---
+    print("  Computing pedigree features...")
+    try:
+        pedigree = build_pedigree_features(rosters)
+        merged = merged.merge(pedigree, on=join_keys_player, how="left")
+        merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    Pedigree features failed: {e}")
+
+    # --- Consistency features (weekly scoring variance) ---
+    print("  Computing consistency features...")
+    try:
+        consistency = build_consistency_features(weekly)
+        merged = merged.merge(consistency, on=join_keys_player, how="left")
+        merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    Consistency features failed: {e}")
+
     # --- Fantasy points target variable ---
     fpts = _compute_fpts_per_game(weekly)
     merged = merged.merge(fpts, on=join_keys_player, how="left")
@@ -297,6 +363,52 @@ def assemble_feature_matrix(
             merged = merged.rename(columns={"games_played_wk": "games_played"})
     else:
         merged["games_played"] = merged["games_played"].fillna(merged.get("games_played_wk", np.nan))
+
+    # --- Rate stats (targets for two-stage efficiency models) ---
+    # Derived from weekly aggregates; used as shift targets in build_yoy_pairs
+    _weekly_agg_cols = {
+        "targets": "total_targets",
+        "receptions": "total_receptions",
+        "receiving_yards": "total_receiving_yards",
+        "receiving_tds": "total_receiving_tds",
+        "carries": "total_carries",
+        "rushing_yards": "total_rushing_yards",
+        "rushing_tds": "total_rushing_tds",
+        "passing_yards": "total_passing_yards",
+        "passing_tds": "total_passing_tds",
+        "attempts": "total_pass_attempts",
+    }
+    available_weekly_cols = {k: v for k, v in _weekly_agg_cols.items() if k in weekly.columns}
+    if available_weekly_cols:
+        rate_agg = (
+            weekly.groupby(["player_id", "season"], observed=True)
+            .agg(**{v: pd.NamedAgg(column=k, aggfunc="sum")
+                    for k, v in available_weekly_cols.items()})
+            .reset_index()
+        )
+        t = rate_agg.get("total_targets", pd.Series(1, index=rate_agg.index)).clip(lower=1)
+        c = rate_agg.get("total_carries", pd.Series(1, index=rate_agg.index)).clip(lower=1)
+        a = rate_agg.get("total_pass_attempts", pd.Series(1, index=rate_agg.index)).clip(lower=1)
+        if "total_receiving_yards" in rate_agg.columns:
+            rate_agg["yards_per_target"] = rate_agg["total_receiving_yards"] / t
+        if "total_receiving_tds" in rate_agg.columns:
+            rate_agg["rec_td_rate"] = rate_agg["total_receiving_tds"] / t
+        if "total_rushing_tds" in rate_agg.columns:
+            rate_agg["rush_td_rate"] = rate_agg["total_rushing_tds"] / c
+        if "total_passing_yards" in rate_agg.columns:
+            rate_agg["pass_yards_per_attempt"] = rate_agg["total_passing_yards"] / a
+        if "total_passing_tds" in rate_agg.columns:
+            rate_agg["pass_td_rate"] = rate_agg["total_passing_tds"] / a
+        # Per-game volume cols for two-stage volume stage targets
+        if "total_targets" in rate_agg.columns and "games_played_wk" not in merged.columns:
+            pass  # games_played derived later; skip per-game volume here
+        rate_cols = ["player_id", "season"] + [
+            c for c in ["yards_per_target", "rec_td_rate", "rush_td_rate",
+                        "pass_yards_per_attempt", "pass_td_rate"]
+            if c in rate_agg.columns
+        ]
+        merged = merged.merge(rate_agg[rate_cols], on=join_keys_player, how="left")
+        merged = _coalesce_suffixed_columns(merged)
 
     # --- Player metadata ---
     meta = _get_player_meta(rosters)

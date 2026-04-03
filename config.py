@@ -180,6 +180,12 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "team_pace",
         "sack_rate",
         "games_played",
+        # Trend factors
+        "target_share_delta",
+        # Situation / pedigree / consistency
+        "team_changed",
+        "years_in_league",
+        "weekly_fpts_cv",
     ],
     "RB": [
         "rush_share",
@@ -194,6 +200,18 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "snap_percentage",
         "games_played",
         "team_pace",
+        # Trend factors
+        "rush_share_delta",
+        "target_share_delta",
+        "snap_trend",
+        # Situation / pedigree / consistency
+        "team_changed",
+        "context_delta_pace",
+        "draft_round_bucket",
+        "years_in_league",
+        "sophomore_flag",
+        "weekly_fpts_cv",
+        "boom_rate",
     ],
     "WR": [
         "target_share",
@@ -209,6 +227,18 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "games_played",
         "team_pass_rate",
         "team_pace",
+        # Trend factors
+        "target_share_delta",
+        "wopr_delta",
+        "snap_trend",
+        # Situation / pedigree / consistency
+        "team_changed",
+        "context_delta_pace",
+        "draft_round_bucket",
+        "years_in_league",
+        "sophomore_flag",
+        "weekly_fpts_cv",
+        "consistency_score",
     ],
     "TE": [
         "target_share",
@@ -221,7 +251,65 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "games_played",
         "team_pass_rate",
         "team_pace",
+        # Trend factors
+        "target_share_delta",
+        "snap_trend",
+        # Situation / pedigree / consistency
+        "team_changed",
+        "context_delta_pace",
+        "years_in_league",
+        "weekly_fpts_cv",
     ],
+}
+
+# ---------------------------------------------------------------------------
+# Two-stage volume × efficiency model configuration
+# ---------------------------------------------------------------------------
+
+# Separate alpha grids: volume signals are persistent (low alpha), efficiency noisy (high alpha)
+VOLUME_RIDGE_ALPHA_GRID: list[float] = [0.1, 1.0, 10.0]
+EFFICIENCY_RIDGE_ALPHA_GRID: list[float] = [10.0, 100.0, 1000.0]
+
+# TD rate mean reversion weight (0 = pure model, 1 = pure positional mean)
+TD_REGRESSION_WEIGHT: float = 0.55
+
+# Catch rate mean reversion weight for combination stage
+CATCH_RATE_REGRESSION_WEIGHT: float = 0.30
+
+# Volume stage feature sets (predicts per-game opportunity volume)
+VOLUME_FEATURES: dict[str, list[str]] = {
+    "QB": [
+        "epa_per_dropback", "cpoe", "team_pace", "rush_attempt_share",
+        "games_played", "team_changed", "context_delta_pace", "target_share_delta",
+    ],
+    "RB": [
+        "rush_share", "target_share", "snap_percentage", "team_pace",
+        "team_changed", "context_delta_pace", "rush_share_delta",
+        "target_share_delta", "snap_trend", "games_played",
+        "draft_round_bucket", "years_in_league",
+    ],
+    "WR": [
+        "target_share", "air_yard_share", "wopr", "snap_percentage",
+        "team_pace", "team_pass_rate", "team_changed", "context_delta_pace",
+        "target_share_delta", "wopr_delta", "snap_trend", "games_played",
+        "draft_round_bucket", "years_in_league",
+    ],
+    "TE": [
+        "target_share", "air_yard_share", "snap_percentage", "team_pace",
+        "team_pass_rate", "team_changed", "context_delta_pace",
+        "target_share_delta", "snap_trend", "games_played",
+        "draft_round_bucket", "years_in_league",
+    ],
+}
+
+# Efficiency stage feature sets (predicts per-play output rates)
+EFFICIENCY_FEATURES: dict[str, list[str]] = {
+    "QB":  ["epa_per_dropback", "cpoe", "deep_ball_rate", "sack_rate", "int_rate"],
+    "RB":  ["epa_per_carry", "rush_success_rate", "ypc", "explosive_run_rate",
+            "stuff_rate", "catch_rate"],
+    "WR":  ["epa_per_target", "catch_rate", "avg_depth_of_target",
+            "yac_per_rec", "explosive_play_rate"],
+    "TE":  ["epa_per_target", "catch_rate", "yac_per_rec"],
 }
 
 # ---------------------------------------------------------------------------

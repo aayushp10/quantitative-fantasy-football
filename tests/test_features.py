@@ -16,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from features.opportunity import build_opportunity_factors
 from features.efficiency import build_efficiency_factors
+from features.situation import detect_team_changes, build_situation_features
+from features.pedigree import build_pedigree_features
+from features.consistency import build_consistency_features
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +386,189 @@ class TestAssembler:
         # Merge manually (assembler tested indirectly via unit tests above)
         merged = opp.merge(eff, on=["player_id", "team", "season"], how="outer")
         assert not merged.duplicated(subset=["player_id", "season"]).any()
+
+
+# ---------------------------------------------------------------------------
+# Situation change detection tests
+# ---------------------------------------------------------------------------
+
+class TestDetectTeamChanges:
+    @pytest.fixture
+    def rosters_with_change(self):
+        return pd.DataFrame({
+            "player_id": ["p1", "p1", "p2", "p2"],
+            "team":      ["NYG", "PHI", "KC",  "KC"],
+            "season":    [2022,   2023,  2022,  2023],
+        })
+
+    def test_team_change_detected(self, rosters_with_change):
+        changes = detect_team_changes(rosters_with_change)
+        assert len(changes) == 1
+        assert changes.iloc[0]["player_id"] == "p1"
+        assert changes.iloc[0]["old_team"] == "NYG"
+        assert changes.iloc[0]["new_team"] == "PHI"
+
+    def test_same_team_not_detected(self, rosters_with_change):
+        changes = detect_team_changes(rosters_with_change)
+        p2_changes = changes[changes["player_id"] == "p2"]
+        assert len(p2_changes) == 0
+
+    def test_output_columns(self, rosters_with_change):
+        changes = detect_team_changes(rosters_with_change)
+        required = {"player_id", "season", "old_team", "new_team"}
+        assert required.issubset(set(changes.columns))
+
+    def test_season_is_earlier_season(self, rosters_with_change):
+        changes = detect_team_changes(rosters_with_change)
+        assert changes.iloc[0]["season"] == 2022  # season N, not N+1
+
+    def test_empty_returns_empty(self):
+        empty = detect_team_changes(pd.DataFrame(columns=["player_id", "team", "season"]))
+        assert len(empty) == 0
+
+    def test_nonconsecutive_seasons_skipped(self):
+        # Player skipped 2022 (2021 → 2023 gap) — should NOT be flagged as a change
+        rosters = pd.DataFrame({
+            "player_id": ["p1", "p1"],
+            "team":      ["NE",  "NYJ"],
+            "season":    [2021,   2023],
+        })
+        changes = detect_team_changes(rosters)
+        assert len(changes) == 0
+
+
+# ---------------------------------------------------------------------------
+# Pedigree features tests
+# ---------------------------------------------------------------------------
+
+class TestBuildPedigreeFeatures:
+    @pytest.fixture
+    def roster_df(self):
+        return pd.DataFrame({
+            "player_id":    ["r1_pick",  "r2_pick",  "udfa",    "r6_pick"],
+            "season":       [2023,        2023,        2023,       2023],
+            "draft_number": [5.0,         40.0,        float("nan"), 200.0],
+            "years_exp":    [0,            1,           3,          5],
+        })
+
+    def test_round1_pick_gets_bucket_5(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        r1 = result[result["player_id"] == "r1_pick"]
+        assert r1["draft_round_bucket"].iloc[0] == 5
+
+    def test_round2_pick_gets_bucket_4(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        r2 = result[result["player_id"] == "r2_pick"]
+        assert r2["draft_round_bucket"].iloc[0] == 4
+
+    def test_udfa_gets_bucket_0(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        udfa = result[result["player_id"] == "udfa"]
+        assert udfa["draft_round_bucket"].iloc[0] == 0
+
+    def test_udfa_draft_capital_score_zero(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        udfa = result[result["player_id"] == "udfa"]
+        assert udfa["draft_capital_score"].iloc[0] == 0.0
+
+    def test_r1_draft_capital_score_high(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        r1 = result[result["player_id"] == "r1_pick"]
+        assert r1["draft_capital_score"].iloc[0] > 0.9
+
+    def test_is_rookie_flag(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        r1 = result[result["player_id"] == "r1_pick"]
+        assert r1["is_rookie"].iloc[0] == 1
+
+    def test_sophomore_flag(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        r2 = result[result["player_id"] == "r2_pick"]
+        assert r2["sophomore_flag"].iloc[0] == 1
+
+    def test_veteran_not_rookie_or_sophomore(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        udfa = result[result["player_id"] == "udfa"]
+        assert udfa["is_rookie"].iloc[0] == 0
+        assert udfa["sophomore_flag"].iloc[0] == 0
+
+    def test_output_columns_present(self, roster_df):
+        result = build_pedigree_features(roster_df)
+        expected = {"player_id", "season", "draft_round_bucket", "draft_capital_score",
+                    "years_in_league", "is_rookie", "sophomore_flag"}
+        assert expected.issubset(set(result.columns))
+
+
+# ---------------------------------------------------------------------------
+# Consistency features tests
+# ---------------------------------------------------------------------------
+
+class TestBuildConsistencyFeatures:
+    @pytest.fixture
+    def weekly_consistent(self):
+        """Player who scores close to 15 every week (consistent)."""
+        return pd.DataFrame({
+            "player_id": ["p_c"] * 16,
+            "season":    [2023] * 16,
+            "week":      list(range(1, 17)),
+            "position":  ["WR"] * 16,
+            "fantasy_points_ppr": [14.5, 15.5, 15.0, 14.8, 15.2, 14.9, 15.1, 15.3,
+                                   14.7, 15.0, 15.4, 14.6, 15.1, 14.8, 15.0, 15.1],
+        })
+
+    @pytest.fixture
+    def weekly_volatile(self):
+        """Player with boom-or-bust profile (high variance)."""
+        return pd.DataFrame({
+            "player_id": ["p_v"] * 16,
+            "season":    [2023] * 16,
+            "week":      list(range(1, 17)),
+            "position":  ["WR"] * 16,
+            "fantasy_points_ppr": [0.0, 35.0, 0.0, 40.0, 0.0, 30.0, 0.0, 25.0,
+                                   0.0, 35.0, 0.0, 38.0, 0.0, 32.0, 0.0, 27.0],
+        })
+
+    def test_consistent_player_low_cv(self, weekly_consistent):
+        result = build_consistency_features(weekly_consistent)
+        cv = result["weekly_fpts_cv"].iloc[0]
+        assert cv < 0.05  # consistent player has very low CV
+
+    def test_volatile_player_high_cv(self, weekly_volatile):
+        result = build_consistency_features(weekly_volatile)
+        cv = result["weekly_fpts_cv"].iloc[0]
+        assert cv > 0.5  # volatile player has high CV
+
+    def test_consistent_higher_consistency_score(self, weekly_consistent, weekly_volatile):
+        r_c = build_consistency_features(weekly_consistent)
+        r_v = build_consistency_features(weekly_volatile)
+        assert r_c["consistency_score"].iloc[0] > r_v["consistency_score"].iloc[0]
+
+    def test_boom_bust_rates_between_0_and_1(self, weekly_volatile):
+        result = build_consistency_features(weekly_volatile)
+        assert 0.0 <= result["boom_rate"].iloc[0] <= 1.0
+        assert 0.0 <= result["bust_rate"].iloc[0] <= 1.0
+
+    def test_consistency_score_between_0_and_1(self, weekly_consistent):
+        result = build_consistency_features(weekly_consistent)
+        score = result["consistency_score"].iloc[0]
+        assert 0.0 <= score <= 1.0
+
+    def test_output_columns_present(self, weekly_consistent):
+        result = build_consistency_features(weekly_consistent)
+        expected = {"player_id", "season", "weekly_fpts_std", "weekly_fpts_cv",
+                    "weekly_fpts_median", "boom_rate", "bust_rate", "consistency_score"}
+        assert expected.issubset(set(result.columns))
+
+    def test_no_position_column_still_works(self):
+        """If position column is absent, boom/bust rates are NaN but other cols computed."""
+        weekly_no_pos = pd.DataFrame({
+            "player_id": ["p1"] * 10,
+            "season":    [2023] * 10,
+            "week":      list(range(1, 11)),
+            "fantasy_points_ppr": [10.0] * 10,
+        })
+        result = build_consistency_features(weekly_no_pos)
+        assert len(result) == 1
+        assert result["weekly_fpts_cv"].iloc[0] == 0.0  # zero variance
+        assert pd.isna(result["boom_rate"].iloc[0])
+        assert pd.isna(result["bust_rate"].iloc[0])

@@ -34,29 +34,31 @@ from features.efficiency import build_efficiency_factors
 # ---------------------------------------------------------------------------
 
 def _compute_delta(
-    full: pd.DataFrame,
+    base: pd.DataFrame,
     late: pd.DataFrame,
     factor_cols: list[str],
     join_keys: list[str] = None,
 ) -> pd.DataFrame:
     """
-    Compute per-player late-season delta relative to full-season values.
+    Compute per-player late-season delta relative to early-season values.
 
-    delta = late_value - full_value
+    delta = late_value - early_value
 
     Positive delta → player's role/efficiency was rising in the second half.
+    Using early (weeks 1 to TREND_WEEK_START-1) vs. late (weeks TREND_WEEK_START+)
+    gives a purer momentum signal than late vs. full (which includes the late weeks).
     """
     if join_keys is None:
         join_keys = ["player_id", "team", "season"]
 
-    merged = full[join_keys + factor_cols].merge(
+    merged = base[join_keys + factor_cols].merge(
         late[join_keys + factor_cols],
         on=join_keys,
-        suffixes=("_full", "_late"),
+        suffixes=("_early", "_late"),
         how="inner",
     )
     for col in factor_cols:
-        merged[f"{col}_delta"] = merged[f"{col}_late"] - merged[f"{col}_full"]
+        merged[f"{col}_delta"] = merged[f"{col}_late"] - merged[f"{col}_early"]
         merged[f"{col}_acceleration"] = merged[f"{col}_delta"]  # alias for readability
 
     return merged
@@ -78,20 +80,21 @@ def _late_season_games(weekly: pd.DataFrame) -> pd.DataFrame:
 
 def _opportunity_trend(pbp: pd.DataFrame) -> pd.DataFrame:
     """
-    Compare late-season opportunity factors vs. full-season.
+    Compare late-season opportunity factors vs. early-season (weeks 1 to TREND_WEEK_START-1).
     """
+    pbp_early = pbp[pbp["week"] < TREND_WEEK_START]
     pbp_late = pbp[pbp["week"] >= TREND_WEEK_START]
 
-    opp_full = build_opportunity_factors(pbp)
+    opp_early = build_opportunity_factors(pbp_early)
     opp_late = build_opportunity_factors(pbp_late)
 
     factor_cols = [c for c in ["target_share", "rush_share", "air_yard_share", "wopr"]
-                   if c in opp_full.columns and c in opp_late.columns]
+                   if c in opp_early.columns and c in opp_late.columns]
 
     if not factor_cols:
         return pd.DataFrame()
 
-    delta = _compute_delta(opp_full, opp_late, factor_cols)
+    delta = _compute_delta(opp_early, opp_late, factor_cols)
     return delta
 
 
@@ -101,22 +104,23 @@ def _opportunity_trend(pbp: pd.DataFrame) -> pd.DataFrame:
 
 def _efficiency_trend(pbp: pd.DataFrame) -> pd.DataFrame:
     """
-    Compare late-season efficiency factors vs. full-season.
+    Compare late-season efficiency factors vs. early-season (weeks 1 to TREND_WEEK_START-1).
     """
+    pbp_early = pbp[pbp["week"] < TREND_WEEK_START]
     pbp_late = pbp[pbp["week"] >= TREND_WEEK_START]
 
-    eff_full = build_efficiency_factors(pbp)
+    eff_early = build_efficiency_factors(pbp_early)
     eff_late = build_efficiency_factors(pbp_late)
 
     factor_cols = [
         c for c in ["epa_per_target", "epa_per_carry", "epa_per_dropback", "catch_rate"]
-        if c in eff_full.columns and c in eff_late.columns
+        if c in eff_early.columns and c in eff_late.columns
     ]
 
     if not factor_cols:
         return pd.DataFrame()
 
-    delta = _compute_delta(eff_full, eff_late, factor_cols)
+    delta = _compute_delta(eff_early, eff_late, factor_cols)
     return delta
 
 
@@ -139,17 +143,18 @@ def _snap_trend(snap_df: pd.DataFrame, season: int) -> pd.DataFrame | None:
         return None
 
     season_snaps = snap_df[snap_df["season"] == season].copy()
-    full_avg = (
-        season_snaps.groupby(["player_id", "season"], observed=True)
-        [snap_pct_col].mean().reset_index().rename(columns={snap_pct_col: "snap_pct_full"})
+    early_avg = (
+        season_snaps[season_snaps["week"] < TREND_WEEK_START]
+        .groupby(["player_id", "season"], observed=True)
+        [snap_pct_col].mean().reset_index().rename(columns={snap_pct_col: "snap_pct_early"})
     )
     late_avg = (
         season_snaps[season_snaps["week"] >= TREND_WEEK_START]
         .groupby(["player_id", "season"], observed=True)
         [snap_pct_col].mean().reset_index().rename(columns={snap_pct_col: "snap_pct_late"})
     )
-    merged = full_avg.merge(late_avg, on=["player_id", "season"])
-    merged["snap_trend"] = merged["snap_pct_late"] - merged["snap_pct_full"]
+    merged = early_avg.merge(late_avg, on=["player_id", "season"])
+    merged["snap_trend"] = merged["snap_pct_late"] - merged["snap_pct_early"]
     return merged[["player_id", "season", "snap_trend"]]
 
 

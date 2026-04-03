@@ -98,6 +98,16 @@ def _player_game_script(pbp: pd.DataFrame) -> pd.DataFrame:
 # Team-level context factors
 # ---------------------------------------------------------------------------
 
+def get_team_context(pbp: pd.DataFrame) -> pd.DataFrame:
+    """
+    Public access to team-level context factors.
+
+    Returns one row per (team, season) with:
+        team_pace, team_pass_rate, team_offensive_epa
+    """
+    return _team_context(pbp)
+
+
 def _team_context(pbp: pd.DataFrame) -> pd.DataFrame:
     """
     Team pace, pass rate, and overall offensive EPA — joined to players later.
