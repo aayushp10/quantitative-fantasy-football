@@ -48,6 +48,11 @@ def adp_board() -> list[dict]:
 
 
 @lru_cache(maxsize=1)
+def history() -> dict:
+    return _load("history.json")
+
+
+@lru_cache(maxsize=1)
 def players_by_id() -> dict[str, dict]:
     return {p["player_id"]: p for p in players()}
 

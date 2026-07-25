@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Recommendation, Recommendations, TierCliffAlert } from "../../lib/types";
 import { RangeBar } from "../RangeBar";
+import { PosBadge } from "../ui";
 import { edgeClass, fmtAdp, fmtDec, fmtPct, fmtSigned, fmtVorp } from "../../lib/format";
 
 export function RecPanel({
@@ -24,25 +25,26 @@ export function RecPanel({
 }) {
   if (!onClock) {
     return (
-      <div className="border border-rule-strong bg-paper-raised p-4 mb-4 text-ink-soft">
+      <div className="glass p-4 mb-4 text-ink-soft">
         {busy ? "bots picking…" : otc ? `waiting — pick ${otc.overall}, team ${otc.slot} on the clock` : ""}
       </div>
     );
   }
   if (!recs) {
-    return (
-      <div className="border border-rule-strong p-4 mb-4 text-ink-mute num">… computing recommendations</div>
-    );
+    return <div className="glass p-4 mb-4 text-ink-mute num">… computing recommendations</div>;
   }
   const [top, ...rest] = recs.recommendations;
   return (
-    <div className="mb-5">
+    <div className="mb-5 float-in">
       {alerts.length > 0 && (
         <div
           role="alert"
-          className="border border-accent bg-accent-soft px-3 py-1.5 mb-3 text-[13px]"
+          className="glass-soft !border-accent/40 px-4 py-2 mb-3 text-[13px]"
+          style={{ borderColor: "rgba(45,212,191,0.4)", background: "rgba(45,212,191,0.08)" }}
         >
-          <span className="font-medium uppercase tracking-wide text-[11px] mr-2">tier cliff</span>
+          <span className="font-semibold uppercase tracking-wide text-[11px] mr-2 text-accent">
+            tier cliff
+          </span>
           {alerts.map((a) => (
             <span key={a.position} className="mr-4 num">
               {a.position} tier {a.tier}: {a.remaining_in_tier} left, −{a.drop_to_next_tier} VORP below
@@ -50,7 +52,7 @@ export function RecPanel({
           ))}
         </div>
       )}
-      <div className="text-[11px] uppercase tracking-[0.08em] text-ink-mute mb-1.5">
+      <div className="text-[10.5px] uppercase tracking-[0.1em] text-ink-mute mb-1.5">
         your pick · #{otc?.overall} · round {otc?.round} · slot {userSlot}
       </div>
       {top && <TopCard r={top} onPick={onPick} onInspect={onInspect} busy={busy} />}
@@ -96,7 +98,7 @@ function Why({ r }: { r: Recommendation }) {
 
 function Row({ k, v, strong }: { k: string; v: string; strong?: boolean }) {
   return (
-    <tr className={strong ? "text-ink font-medium" : ""}>
+    <tr className={strong ? "text-ink font-semibold" : ""}>
       <td className="pr-3">{k}</td>
       <td className="text-right">{v}</td>
     </tr>
@@ -115,30 +117,33 @@ function TopCard({
   busy: boolean;
 }) {
   return (
-    <div className="border-2 border-accent p-3 bg-paper">
-      <div className="flex items-baseline gap-3">
+    <div
+      className="glass p-4"
+      style={{ borderColor: "rgba(45,212,191,0.45)", boxShadow: "0 10px 34px rgba(2,6,18,0.45), 0 0 24px rgba(45,212,191,0.12), inset 0 1px 0 rgba(255,255,255,0.1)" }}
+    >
+      <div className="flex items-center gap-3">
+        <PosBadge pos={r.position} rank={r.pos_rank} />
         <button
-          className="text-[16px] font-medium hover:text-accent"
+          className="text-[17px] font-semibold hover:text-accent"
           onClick={() => onInspect(r.player_id)}
         >
           {r.name}
         </button>
         <span className="num text-ink-soft">
-          {r.position}
-          {r.pos_rank} · {r.team ?? "FA"} · tier {r.tier ?? "–"}
+          {r.team ?? "FA"} · tier {r.tier ?? "–"}
         </span>
-        <span className="ml-auto num text-[15px] font-medium">score {fmtDec(r.rec_score, 1)}</span>
+        <span className="ml-auto num text-[15px] font-semibold">score {fmtDec(r.rec_score, 1)}</span>
         <button
           onClick={() => onPick(r.player_id)}
           disabled={busy}
-          className="bg-ink text-paper px-4 py-1 text-[13px] hover:bg-accent disabled:opacity-40"
+          className="btn-primary px-5 py-1.5 text-[13px] disabled:opacity-40"
         >
           Draft
         </button>
       </div>
-      <div className="flex items-center gap-6 mt-2 num text-[13px]">
+      <div className="flex items-center gap-6 mt-2.5 num text-[13px]">
         <span>
-          VORP <span className="font-medium">{fmtVorp(r.vorp)}</span>
+          VORP <span className="font-semibold">{fmtVorp(r.vorp)}</span>
         </span>
         <span>
           ADP {fmtAdp(r.adp)}{" "}
@@ -146,7 +151,7 @@ function TopCard({
         </span>
         <span>
           survives to your pick{" "}
-          <span className={r.p_survive < 0.4 ? "text-edge-neg font-medium" : "font-medium"}>
+          <span className={r.p_survive < 0.4 ? "text-edge-neg font-semibold" : "font-semibold"}>
             {fmtPct(r.p_survive)}
           </span>
         </span>
@@ -178,17 +183,17 @@ function RunnerUp({
   busy: boolean;
 }) {
   return (
-    <div className="border border-rule-strong p-2 flex flex-col">
+    <div className="glass-soft p-2.5 flex flex-col">
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <PosBadge pos={r.position} rank={r.pos_rank} />
+        <span className="num text-[10.5px] text-ink-mute">t{r.tier ?? "–"}</span>
+      </div>
       <button
         className="text-left font-medium text-[13px] leading-tight hover:text-accent"
         onClick={() => onInspect(r.player_id)}
       >
         {r.name}
       </button>
-      <span className="num text-[11px] text-ink-soft">
-        {r.position}
-        {r.pos_rank} · t{r.tier ?? "–"}
-      </span>
       <span className="num text-[12px] mt-1">
         v {fmtVorp(r.vorp)} · s {fmtDec(r.rec_score, 1)}
       </span>
@@ -199,7 +204,7 @@ function RunnerUp({
       <button
         onClick={() => onPick(r.player_id)}
         disabled={busy}
-        className="mt-auto border border-ink px-2 py-0.5 text-[12px] hover:bg-ink hover:text-paper disabled:opacity-40 self-start"
+        className="btn-ghost mt-auto px-3 py-0.5 text-[12px] disabled:opacity-40 self-start"
       >
         draft
       </button>

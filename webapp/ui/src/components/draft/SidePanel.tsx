@@ -81,8 +81,8 @@ export function SidePanel({
   const otc = state.on_the_clock;
 
   return (
-    <div className="flex-1 min-w-[300px] max-w-[380px]">
-      <div className="flex items-center gap-3 border-b border-ink pb-1.5 mb-3">
+    <div className="flex-1 min-w-[300px] max-w-[380px] glass p-4">
+      <div className="flex items-center gap-3 border-b border-rule-strong pb-2 mb-3">
         <span className="num text-[13px]">
           {otc
             ? `pick ${otc.overall}/${state.config.teams * state.config.rounds} · round ${otc.round}`
@@ -91,7 +91,7 @@ export function SidePanel({
         <button
           onClick={onUndo}
           disabled={busy || !state.picks.some((p) => p.is_user)}
-          className="ml-auto border border-rule-strong px-2 py-0.5 text-[11px] hover:border-ink disabled:opacity-30"
+          className="btn-ghost ml-auto px-2.5 py-0.5 text-[11px] disabled:opacity-30"
         >
           undo my last pick
         </button>
@@ -125,10 +125,13 @@ export function SidePanel({
             {Object.entries(needWeights).map(([pos, w]) => (
               <div key={pos} className="flex items-center gap-2 py-0.5">
                 <span className="num text-[11px] w-7 text-ink-soft">{pos}</span>
-                <div className="h-[5px] flex-1 bg-rule">
+                <div className="h-[6px] flex-1 rounded-full bg-[rgba(255,255,255,0.08)] overflow-hidden">
                   <div
-                    className="h-full bg-ink-soft"
-                    style={{ width: `${Math.round(w * 100)}%` }}
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.round(w * 100)}%`,
+                      background: "linear-gradient(90deg, rgba(45,212,191,0.5), var(--color-accent))",
+                    }}
                   />
                 </div>
                 <span className="num text-[11px] text-ink-mute w-8 text-right">
@@ -148,14 +151,14 @@ export function SidePanel({
               <tr
                 key={p.overall}
                 className={`${i >= newPicksFrom ? "pick-in" : ""} ${
-                  p.is_user ? "bg-accent-soft" : ""
+                  p.is_user ? "bg-[rgba(45,212,191,0.08)]" : ""
                 }`}
               >
                 <td className="num text-ink-mute w-12">
                   {p.round}.{String(p.overall - (p.round - 1) * state.config.teams).padStart(2, "0")}
                 </td>
                 <td className="num text-ink-mute w-8">t{p.slot}</td>
-                <td className={p.is_user ? "font-medium" : ""}>{p.player_name}</td>
+                <td className={p.is_user ? "font-semibold text-accent" : ""}>{p.player_name}</td>
                 <td className="num text-ink-soft">{p.position}</td>
               </tr>
             ))}

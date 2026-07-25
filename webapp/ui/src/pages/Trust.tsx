@@ -61,9 +61,9 @@ export default function Trust() {
   );
 
   return (
-    <div className="max-w-4xl">
-      <div className="border border-rule-strong bg-paper-raised p-4 my-2 max-w-3xl">
-        <div className="text-[11px] uppercase tracking-[0.08em] text-ink-mute mb-1">verdict</div>
+    <div className="max-w-5xl float-in">
+      <div className="glass p-5 my-2 max-w-3xl">
+        <div className="text-[11px] uppercase tracking-[0.1em] text-accent mb-1 font-semibold">verdict</div>
         <p className="leading-relaxed">{verdict.text}</p>
         <p className="num text-[12px] text-ink-mute mt-2">
           mean IC edge vs ADP {fmtSigned(verdict.meanEdge, 3)} · mean L/S spread{" "}
@@ -72,6 +72,7 @@ export default function Trust() {
         </p>
       </div>
 
+      <div className="glass px-5 py-4 mt-4 overflow-x-auto">
       <SectionTitle>Accuracy per held-out season (points per game)</SectionTitle>
       <table className="data max-w-3xl">
         <thead>
@@ -201,6 +202,7 @@ export default function Trust() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

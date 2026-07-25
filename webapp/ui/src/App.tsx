@@ -36,23 +36,25 @@ export default function App() {
   return (
     <Ctx.Provider value={ctx}>
       <div className="min-w-[1100px] max-w-[1500px] mx-auto px-6 pb-16">
-        <header className="flex items-baseline gap-6 border-b border-ink pt-5 pb-2 mb-4">
-          <div className="font-medium tracking-tight text-[15px]">
+        <header className="glass sticky top-3 z-30 flex items-center gap-6 px-5 py-2.5 mt-3 mb-6">
+          <div className="font-semibold tracking-tight text-[15px]">
             FF<span className="text-accent">/</span>TERMINAL
-            <span className="num text-ink-mute ml-2 text-[12px]">
-              {meta ? `${meta.projection_season} · model ${meta.model_version}` : "…"}
+            <span className="num text-ink-mute ml-2 text-[11px] font-normal">
+              {meta ? `${meta.projection_season} · ${meta.model_version}` : "…"}
             </span>
           </div>
-          <nav className="flex gap-4 text-[13px]">
+          <nav className="flex gap-1 text-[13px]">
             {NAV.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 end={n.to === "/"}
                 className={({ isActive }) =>
-                  isActive
-                    ? "text-accent font-medium underline underline-offset-4"
-                    : "text-ink-soft hover:text-ink"
+                  `pill px-3.5 py-1 transition-colors ${
+                    isActive
+                      ? "bg-accent-soft text-accent font-semibold"
+                      : "text-ink-soft hover:text-ink hover:bg-[rgba(255,255,255,0.05)]"
+                  }`
                 }
               >
                 {n.label}
@@ -67,7 +69,7 @@ export default function App() {
               id="fmt"
               value={format}
               onChange={(e) => setFormat(e.target.value)}
-              className="num border border-rule-strong bg-paper px-1.5 py-0.5"
+              className="num field px-2 py-1"
             >
               {(meta?.formats ?? [{ key: format, label: format, league_size: 0, roster: {} }]).map(
                 (f) => (
@@ -87,7 +89,7 @@ export default function App() {
           <Route path="/draft" element={<Draft />} />
         </Routes>
         {meta && (
-          <footer className="mt-10 pt-2 border-t border-rule text-[11px] text-ink-mute num">
+          <footer className="mt-10 pt-3 border-t border-rule text-[11px] text-ink-mute num">
             trained {meta.seasons_trained[0]}–{meta.seasons_trained[1]} · ADP{" "}
             {meta.adp_source} ({meta.adp_format}, {meta.adp_snapshot_date}) ·{" "}
             {meta.player_count} players · built {meta.build_timestamp}

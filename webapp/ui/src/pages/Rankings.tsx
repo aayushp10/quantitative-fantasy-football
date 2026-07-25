@@ -4,7 +4,7 @@ import { useFormat } from "../App";
 import { useApi } from "../lib/api";
 import type { Player } from "../lib/types";
 import { RangeBar } from "../components/RangeBar";
-import { ErrorPanel, Loading, TierBreak } from "../components/ui";
+import { ErrorPanel, Loading, PosBadge, Segmented, TierBreak } from "../components/ui";
 import { edgeClass, fmtAdp, fmtDec, fmtPts, fmtSigned, fmtVorp } from "../lib/format";
 
 const POSITIONS = ["ALL", "QB", "RB", "WR", "TE"];
@@ -56,7 +56,6 @@ export default function Rankings() {
     return [0, hi];
   }, [rows]);
 
-  // Tier breaks are meaningful within a single position ordered by rank
   const showTiers = pos !== "ALL" && sort.key === "overall_rank" && sort.asc;
 
   if (error) return <ErrorPanel error={error} />;
@@ -65,10 +64,12 @@ export default function Rankings() {
   const header = (c: (typeof COLS)[number]) =>
     c.key ? (
       <button
-        className={`uppercase tracking-[0.06em] ${sort.key === c.key ? "text-ink" : ""}`}
+        className={`uppercase tracking-[0.08em] ${sort.key === c.key ? "text-accent" : ""}`}
         onClick={() =>
           setSort((s) =>
-            s.key === c.key ? { key: c.key!, asc: !s.asc } : { key: c.key!, asc: c.key === "overall_rank" || c.key === "adp" || c.key === "age" },
+            s.key === c.key
+              ? { key: c.key!, asc: !s.asc }
+              : { key: c.key!, asc: c.key === "overall_rank" || c.key === "adp" || c.key === "age" },
           )
         }
       >
@@ -82,92 +83,83 @@ export default function Rankings() {
   let lastTier: number | null = null;
 
   return (
-    <div>
+    <div className="float-in">
       <div className="flex items-center gap-3 mb-3">
-        <div className="flex border border-rule-strong">
-          {POSITIONS.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPos(p)}
-              aria-pressed={pos === p}
-              className={`px-2.5 py-1 text-[12px] num ${
-                pos === p ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
+        <Segmented options={POSITIONS} value={pos} onChange={setPos} />
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="search player…"
           aria-label="Search player"
-          className="border border-rule-strong bg-paper px-2 py-1 text-[13px] w-56"
+          className="field px-3 py-1.5 text-[13px] w-56"
         />
         <span className="num text-ink-mute text-[12px] ml-auto">{rows.length} players</span>
       </div>
 
-      <table className="data">
-        <thead>
-          <tr>
-            {COLS.map((c, i) => (
-              <th key={i} className={c.num ? "num" : ""}>
-                {header(c)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((p) => {
-            const tierBreak =
-              showTiers && p.tier != null && p.tier !== lastTier ? (
-                <TierBreak key={`t${p.tier}`} tier={p.tier} colSpan={COLS.length} />
-              ) : null;
-            if (showTiers && p.tier != null) lastTier = p.tier;
-            return (
-              <FragmentRow key={p.player_id} tierBreak={tierBreak}>
-                <tr
-                  className="cursor-pointer"
-                  tabIndex={0}
-                  onClick={() => nav(`/players/${p.player_id}`)}
-                  onKeyDown={(e) => e.key === "Enter" && nav(`/players/${p.player_id}`)}
-                >
-                  <td className="num text-ink-mute">{p.overall_rank}</td>
-                  <td className="font-medium">
-                    {p.name}
-                    {p.rookie && (
-                      <span className="ml-1.5 text-[10px] uppercase text-accent tracking-wide">R</span>
-                    )}
-                  </td>
-                  <td className="num text-ink-soft">
-                    {p.position}
-                    {p.pos_rank}
-                  </td>
-                  <td className="text-ink-soft">{p.team ?? "–"}</td>
-                  <td className="num">{fmtDec(p.age, 0)}</td>
-                  <td className="num font-medium">{fmtVorp(p.vorp)}</td>
-                  <td className="num">{fmtPts(p.season_p50)}</td>
-                  <td>
-                    <RangeBar
-                      p10={p.season_p10}
-                      p25={p.season_p25}
-                      p50={p.season_p50}
-                      p75={p.season_p75}
-                      p90={p.season_p90}
-                      domain={domain}
-                    />
-                  </td>
-                  <td className="num text-ink-soft">{fmtAdp(p.adp)}</td>
-                  <td className={`num ${edgeClass(p.adp_edge)}`} title="positive: market lets you wait; negative: must reach">
-                    {fmtSigned(p.adp_edge)}
-                  </td>
-                </tr>
-              </FragmentRow>
-            );
-          })}
-        </tbody>
-      </table>
+      <div className="glass px-4 py-2">
+        <table className="data">
+          <thead>
+            <tr>
+              {COLS.map((c, i) => (
+                <th key={i} className={c.num ? "num" : ""}>
+                  {header(c)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => {
+              const tierBreak =
+                showTiers && p.tier != null && p.tier !== lastTier ? (
+                  <TierBreak key={`t${p.tier}`} tier={p.tier} colSpan={COLS.length} />
+                ) : null;
+              if (showTiers && p.tier != null) lastTier = p.tier;
+              return (
+                <FragmentRow key={p.player_id} tierBreak={tierBreak}>
+                  <tr
+                    className="cursor-pointer"
+                    tabIndex={0}
+                    onClick={() => nav(`/players/${p.player_id}`)}
+                    onKeyDown={(e) => e.key === "Enter" && nav(`/players/${p.player_id}`)}
+                  >
+                    <td className="num text-ink-mute">{p.overall_rank}</td>
+                    <td className="font-medium">
+                      {p.name}
+                      {p.rookie && (
+                        <span className="ml-1.5 text-[10px] uppercase text-accent tracking-wide">R</span>
+                      )}
+                    </td>
+                    <td>
+                      <PosBadge pos={p.position} rank={p.pos_rank} />
+                    </td>
+                    <td className="text-ink-soft">{p.team ?? "–"}</td>
+                    <td className="num">{fmtDec(p.age, 0)}</td>
+                    <td className="num font-semibold">{fmtVorp(p.vorp)}</td>
+                    <td className="num">{fmtPts(p.season_p50)}</td>
+                    <td>
+                      <RangeBar
+                        p10={p.season_p10}
+                        p25={p.season_p25}
+                        p50={p.season_p50}
+                        p75={p.season_p75}
+                        p90={p.season_p90}
+                        domain={domain}
+                      />
+                    </td>
+                    <td className="num text-ink-soft">{fmtAdp(p.adp)}</td>
+                    <td
+                      className={`num ${edgeClass(p.adp_edge)}`}
+                      title="positive: market lets you wait; negative: must reach"
+                    >
+                      {fmtSigned(p.adp_edge)}
+                    </td>
+                  </tr>
+                </FragmentRow>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

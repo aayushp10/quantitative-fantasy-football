@@ -16,12 +16,12 @@ export default function PlayerPage() {
   if (loading || !data) return <Loading label="player" />;
 
   return (
-    <div className="max-w-3xl">
+    <div className="max-w-4xl">
       <Link to="/" className="text-[12px] text-accent hover:underline">
         ← rankings
       </Link>
-      <div className="mt-2">
-        <PlayerCard p={data} />
+      <div className="mt-3">
+        <PlayerCard p={data} format={format} />
       </div>
     </div>
   );

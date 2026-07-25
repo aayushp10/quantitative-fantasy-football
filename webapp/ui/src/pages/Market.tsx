@@ -13,7 +13,7 @@ import {
 import { useFormat } from "../App";
 import { useApi } from "../lib/api";
 import type { Player } from "../lib/types";
-import { ErrorPanel, Loading, SectionTitle } from "../components/ui";
+import { ErrorPanel, Loading, PosBadge, SectionTitle, Segmented } from "../components/ui";
 import { edgeClass, fmtAdp, fmtSigned, fmtVorp } from "../lib/format";
 
 const POSITIONS = ["ALL", "QB", "RB", "WR", "TE"];
@@ -58,7 +58,7 @@ export default function Market() {
   if (loading || !data) return <Loading label="market comparison" />;
 
   const board = (rows: Player[], title: string, note: string) => (
-    <div className="flex-1 min-w-0">
+    <div className="flex-1 min-w-0 glass px-4 py-3">
       <SectionTitle>{title}</SectionTitle>
       <p className="text-[11px] text-ink-mute -mt-1 mb-2">{note}</p>
       <table className="data">
@@ -82,9 +82,8 @@ export default function Market() {
               onKeyDown={(e) => e.key === "Enter" && nav(`/players/${p.player_id}`)}
             >
               <td className="font-medium">{p.name}</td>
-              <td className="num text-ink-soft">
-                {p.position}
-                {p.pos_rank}
+              <td>
+                <PosBadge pos={p.position} rank={p.pos_rank} />
               </td>
               <td className="num">{fmtAdp(p.adp)}</td>
               <td className="num text-accent">{fmtAdp(p.predicted_adp)}</td>
@@ -99,37 +98,25 @@ export default function Market() {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-2">
-        <div className="flex border border-rule-strong">
-          {POSITIONS.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPos(p)}
-              aria-pressed={pos === p}
-              className={`px-2.5 py-1 text-[12px] num ${
-                pos === p ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center gap-3 mb-3">
+        <Segmented options={POSITIONS} value={pos} onChange={setPos} />
         <span className="text-[12px] text-ink-mute">
           edge = ADP − model-implied ADP. <span className="text-edge-pos">+ market lets you wait</span> ·{" "}
           <span className="text-edge-neg">− you must reach</span> · draft-relevant universe (ADP ≤ {MAX_ADP})
         </span>
       </div>
 
-      <div className="flex gap-10 items-start">
+      <div className="flex gap-4 items-start">
         {board(modelLoves, "Model loves (market late)", "biggest positive edge — value at cost")}
         {board(marketLoves, "Market loves (model out)", "biggest negative edge — the market pays more than the model would")}
       </div>
 
+      <div className="glass px-5 py-4 mt-4 max-w-3xl">
       <SectionTitle>Model-implied ADP vs market ADP</SectionTitle>
       <p className="text-[11px] text-ink-mute -mt-1 mb-2">
         below the diagonal: model prices the player earlier than the market drafts them
       </p>
-      <div className="h-[440px] max-w-3xl">
+      <div className="h-[440px]">
         <ResponsiveContainer>
           <ScatterChart margin={{ top: 8, right: 16, bottom: 26, left: 8 }}>
             <CartesianGrid stroke="var(--color-rule)" strokeDasharray="2 4" />
@@ -175,7 +162,7 @@ export default function Market() {
                 const p = payload?.[0]?.payload as Player | undefined;
                 if (!p) return null;
                 return (
-                  <div className="bg-paper border border-rule-strong px-2 py-1 text-[12px]">
+                  <div className="glass !rounded-xl px-2.5 py-1.5 text-[12px]">
                     <div className="font-medium">{p.name}</div>
                     <div className="num text-ink-soft">
                       {p.position}
@@ -189,7 +176,7 @@ export default function Market() {
             <Scatter
               data={priced}
               fill="var(--color-ink-soft)"
-              fillOpacity={0.75}
+              fillOpacity={0.8}
               onClick={(d: unknown) => {
                 const p = d as Player;
                 if (p?.player_id) nav(`/players/${p.player_id}`);
@@ -197,6 +184,7 @@ export default function Market() {
             />
           </ScatterChart>
         </ResponsiveContainer>
+      </div>
       </div>
     </div>
   );

@@ -65,6 +65,13 @@ def player_detail(player_id: str, format: str = "12_ppr"):
     return out
 
 
+@app.get("/api/players/{player_id}/history")
+def player_history(player_id: str):
+    if player_id not in store.players_by_id():
+        raise HTTPException(404, f"player {player_id} not found")
+    return store.history().get(player_id, {"seasons": [], "weekly": {}})
+
+
 @app.get("/api/adp_board")
 def adp_board():
     return store.adp_board()

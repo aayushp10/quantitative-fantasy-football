@@ -73,12 +73,25 @@ changed.
 
 ## Phase 3 — UI
 
-- Accent color is a single terminal-gold (#A16207) used only for
-  interactive/highlight states; everything else is near-black ink on paper.
-  Market-edge polarity uses a CVD-validated pair (#047857 / #B91C1C, deutan
-  ΔE 8.4) and every edge number carries an explicit +/− sign, so color is
-  never the only encoding. Position identity is text, not color. The look
-  is deliberately light-only.
+- **v2 redesign (user request): Sleeper × Apple liquid glass.** The original
+  light "paper terminal" was replaced with a dark glass system: deep-navy
+  base with fixed ambient color glows, translucent blurred cards with
+  hairline light borders, pill controls and Apple-style segmented controls,
+  one teal accent for interactive states. All data color re-validated on
+  the dark card surface (#141B2F): position badges QB #D6408B / WR #3B76E0 /
+  RB #0FA372 / TE #C98110 (declared adjacency order keeps confusable hues
+  apart; worst adjacent ΔE 9.0, and the badge text label always carries
+  identity), edge polarity pair #12A878 / #C0334D (deutan ΔE 9.8, signs
+  always shown). Chart series use blue #3B76E0 primary / orange #C98110
+  secondary (CVD-safe pair) with legends on two-series charts.
+- **history.json** (build script) freezes per-player career rows from the
+  feature matrix (one per season, team-stint deduped by usage) plus weekly
+  PPR game logs for the last 3 seasons; served at
+  `/api/players/{id}/history`. Player pages render career PPG (with the
+  2026 projection as a dashed outline bar), usage trend, efficiency trend
+  (EPA vs zero line), a weekly game log with boom (≥20) / bust (<8) tinting
+  and season switcher, and percentile bars vs veteran position cohort
+  (computed client-side from the players list).
 - The range bar renders season_p10..p90 on a shared scale per table view
   (so rows are comparable) and on its own scale in the player header
   (where the labels carry the numbers).

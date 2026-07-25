@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AdpBoardRow, DraftState, Player } from "../../lib/types";
 import { RangeBar } from "../RangeBar";
+import { PosBadge, Segmented } from "../ui";
 import { edgeClass, fmtAdp, fmtPct, fmtSigned, fmtVorp } from "../../lib/format";
 
 const POSITIONS = ["ALL", "QB", "RB", "WR", "TE", "K", "DST"];
@@ -79,32 +80,19 @@ export function AvailableTable({
   return (
     <div>
       <div className="flex items-center gap-3 mb-2">
-        <span className="text-[11px] uppercase tracking-[0.08em] text-ink-mute">available</span>
-        <div className="flex border border-rule-strong">
-          {POSITIONS.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPos(p)}
-              aria-pressed={pos === p}
-              className={`px-2 py-0.5 text-[11px] num ${
-                pos === p ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
+        <span className="text-[11px] uppercase tracking-[0.1em] text-ink-mute">available</span>
+        <Segmented options={POSITIONS} value={pos} onChange={setPos} />
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="search…"
           aria-label="Search available players"
-          className="border border-rule-strong bg-paper px-2 py-0.5 text-[12px] w-44"
+          className="field px-3 py-1 text-[12px] w-44"
         />
       </div>
-      <div className="max-h-[520px] overflow-y-auto border-b border-rule">
+      <div className="glass px-3 py-1 max-h-[520px] overflow-y-auto">
         <table className="data">
-          <thead className="sticky top-0 bg-paper">
+          <thead className="sticky top-0" style={{ background: "rgba(16,23,42,0.92)", backdropFilter: "blur(8px)" }}>
             <tr>
               <th>player</th>
               <th>pos</th>
@@ -134,9 +122,8 @@ export function AvailableTable({
                     <span className="ml-1.5 text-[10px] uppercase text-ink-mute">no proj</span>
                   )}
                 </td>
-                <td className="num text-ink-soft">
-                  {r.position}
-                  {r.player?.pos_rank ?? ""}
+                <td>
+                  <PosBadge pos={r.position} rank={r.player?.pos_rank} />
                 </td>
                 <td className="text-ink-soft">{r.team ?? "–"}</td>
                 <td className="num font-medium">{fmtVorp(r.player?.vorp ?? null)}</td>
@@ -170,7 +157,7 @@ export function AvailableTable({
                   <button
                     onClick={() => onPick(r.player_id)}
                     disabled={!canPick}
-                    className="border border-rule-strong px-2 text-[11px] hover:bg-ink hover:text-paper hover:border-ink disabled:opacity-30"
+                    className="btn-ghost px-2.5 py-0.5 text-[11px] disabled:opacity-30"
                   >
                     draft
                   </button>

@@ -58,6 +58,19 @@ def test_player_detail():
     assert client.get("/api/players/nope").status_code == 404
 
 
+def test_player_history():
+    players = client.get("/api/players").json()
+    vet = next(p for p in players if not p["rookie"])
+    h = client.get(f"/api/players/{vet['player_id']}/history").json()
+    assert h["seasons"], "veteran should have season history"
+    row = h["seasons"][-1]
+    assert {"season", "fpts_pg", "games"} <= set(row)
+    assert all(s0["season"] < s1["season"] for s0, s1 in zip(h["seasons"], h["seasons"][1:]))
+    for wk in h["weekly"].values():
+        assert all({"week", "pts"} <= set(w) for w in wk)
+    assert client.get("/api/players/nope/history").status_code == 404
+
+
 def test_trust():
     t = client.get("/api/trust").json()
     assert t["backtest"] and t["vs_market"] and t["coverage"] and t["top_factors"]

@@ -25,8 +25,8 @@ export function PlayerDrawer({
 
   return (
     <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Player detail">
-      <div className="absolute inset-0 bg-ink/20" onClick={onClose} />
-      <div className="absolute right-0 top-0 h-full w-[560px] bg-paper border-l border-ink overflow-y-auto p-6">
+      <div className="absolute inset-0 bg-[rgba(4,7,16,0.55)] backdrop-blur-[2px]" onClick={onClose} />
+      <div className="absolute right-2 top-2 bottom-2 w-[720px] glass !rounded-3xl overflow-y-auto p-6 float-in">
         <button
           onClick={onClose}
           className="text-[12px] text-accent hover:underline mb-3"
@@ -36,7 +36,7 @@ export function PlayerDrawer({
         </button>
         {error && <ErrorPanel error={error} />}
         {loading && <Loading label="player" />}
-        {data && <PlayerCard p={data} />}
+        {data && <PlayerCard p={data} format={format} />}
       </div>
     </div>
   );

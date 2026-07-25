@@ -79,7 +79,7 @@ function Setup({ onCreated }: { onCreated: (id: string) => void }) {
       <span className="uppercase tracking-wide text-[10px] text-ink-mute">{label}</span>
       <input
         type="number"
-        className="num border border-rule-strong bg-paper px-2 py-1 w-20"
+        className="num field px-2 py-1.5 w-20"
         value={value}
         min={min}
         max={max}
@@ -89,8 +89,8 @@ function Setup({ onCreated }: { onCreated: (id: string) => void }) {
   );
 
   return (
-    <div className="max-w-xl">
-      <h1 className="text-lg font-medium mb-1">Mock draft</h1>
+    <div className="max-w-xl glass p-6 float-in">
+      <h1 className="text-lg font-semibold mb-1">Mock draft</h1>
       <p className="text-ink-soft text-[13px] mb-4">
         You draft against {teams - 1} ADP-driven bots with private boards; the model
         recommends picks from VORP, roster need, and survival odds.
@@ -104,7 +104,7 @@ function Setup({ onCreated }: { onCreated: (id: string) => void }) {
           <select
             value={fmt}
             onChange={(e) => setFmt(e.target.value)}
-            className="num border border-rule-strong bg-paper px-2 py-1"
+            className="num field px-2 py-1.5"
           >
             {(meta?.formats ?? []).map((f) => (
               <option key={f.key} value={f.key}>
@@ -124,7 +124,7 @@ function Setup({ onCreated }: { onCreated: (id: string) => void }) {
                 type="number"
                 min={0}
                 max={9}
-                className="num border border-rule-strong bg-paper px-1 py-0.5 w-12"
+                className="num field px-1.5 py-1 w-12"
                 value={roster[k]}
                 onChange={(e) => setRoster({ ...roster, [k]: Number(e.target.value) })}
               />
@@ -136,7 +136,7 @@ function Setup({ onCreated }: { onCreated: (id: string) => void }) {
       <button
         onClick={create}
         disabled={busy || slot > teams}
-        className="mt-5 bg-ink text-paper px-4 py-1.5 text-[13px] disabled:opacity-40 hover:bg-accent"
+        className="btn-primary mt-5 px-5 py-2 text-[13px] disabled:opacity-40"
       >
         {busy ? "creating…" : "Start draft"}
       </button>

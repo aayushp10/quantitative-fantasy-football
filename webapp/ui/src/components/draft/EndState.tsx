@@ -69,27 +69,21 @@ export function EndState({
   };
 
   return (
-    <div>
-      <div className="flex items-baseline gap-6 mb-4">
-        <h1 className="text-lg font-medium">Draft complete</h1>
+    <div className="float-in">
+      <div className="glass flex items-center gap-6 mb-4 px-5 py-3">
+        <h1 className="text-lg font-semibold">Draft complete</h1>
         <span className="num text-[14px]">
-          your projected points <span className="font-medium">{fmtPts(userTotal)}</span> · league
+          your projected points <span className="font-semibold">{fmtPts(userTotal)}</span> · league
           median {fmtPts(median)} ·{" "}
           <span className={diff >= 0 ? "text-edge-pos" : "text-edge-neg"}>
             {diff >= 0 ? "+" : ""}
             {fmtPts(diff)}
           </span>
         </span>
-        <button
-          onClick={exportCsv}
-          className="ml-auto border border-ink px-3 py-1 text-[12px] hover:bg-ink hover:text-paper"
-        >
+        <button onClick={exportCsv} className="btn-primary ml-auto px-4 py-1.5 text-[12px]">
           export CSV
         </button>
-        <button
-          onClick={onUndo}
-          className="border border-rule-strong px-3 py-1 text-[12px] hover:border-ink"
-        >
+        <button onClick={onUndo} className="btn-ghost px-4 py-1.5 text-[12px]">
           undo last pick
         </button>
         <button onClick={onExit} className="text-[12px] text-ink-mute hover:text-edge-neg">
@@ -97,7 +91,7 @@ export function EndState({
         </button>
       </div>
 
-      <div className="overflow-x-auto">
+      <div className="glass px-4 py-3 overflow-x-auto">
         <table className="data">
           <thead>
             <tr>

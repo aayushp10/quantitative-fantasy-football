@@ -188,3 +188,44 @@ export interface AdpBoardRow {
   streamer: boolean;
   has_projection: boolean;
 }
+
+export interface SeasonRow {
+  season: number;
+  team: string | null;
+  age: number | null;
+  games: number | null;
+  fpts_pg: number | null;
+  fpts_total: number | null;
+  snap_pct: number | null;
+  target_share: number | null;
+  wopr: number | null;
+  tprr: number | null;
+  targets_pg: number | null;
+  epa_per_target: number | null;
+  rush_share: number | null;
+  carries_pg: number | null;
+  epa_per_carry: number | null;
+  ypc: number | null;
+  dropbacks_pg: number | null;
+  epa_per_dropback: number | null;
+  cpoe: number | null;
+  boom_rate: number | null;
+  bust_rate: number | null;
+  trend_class: string | null;
+  x_rec_td_rate: number | null;
+  rec_td_oe: number | null;
+  x_rush_td_rate: number | null;
+  rush_td_oe: number | null;
+  x_pass_td_rate: number | null;
+  pass_td_oe: number | null;
+}
+
+export interface WeeklyPoint {
+  week: number;
+  pts: number;
+}
+
+export interface PlayerHistory {
+  seasons: SeasonRow[];
+  weekly: Record<string, WeeklyPoint[]>;
+}

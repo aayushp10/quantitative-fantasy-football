@@ -216,6 +216,7 @@ def build_board(season: int):
     extras = {
         "pairs": pairs,
         "fm": fm,
+        "weekly": weekly,
         "resids": resids,
         "rq": rq,
         "rookie_picks": rookie_picks,
@@ -433,6 +434,74 @@ def build_trust_json(pairs: pd.DataFrame, resids, rq) -> dict:
     }
 
 
+_HISTORY_COLS = {
+    "team": "team", "age": "age", "games_played": "games",
+    "fpts_per_game": "fpts_pg", "fpts": "fpts_total",
+    "snap_percentage": "snap_pct", "target_share": "target_share",
+    "wopr": "wopr", "tprr": "tprr", "targets_per_game": "targets_pg",
+    "epa_per_target": "epa_per_target", "rush_share": "rush_share",
+    "carries_per_game": "carries_pg", "epa_per_carry": "epa_per_carry",
+    "ypc": "ypc", "dropbacks_per_game": "dropbacks_pg",
+    "epa_per_dropback": "epa_per_dropback", "cpoe": "cpoe",
+    "boom_rate": "boom_rate", "bust_rate": "bust_rate",
+    "trend_class": "trend_class",
+    "x_rec_td_rate": "x_rec_td_rate", "rec_td_oe": "rec_td_oe",
+    "x_rush_td_rate": "x_rush_td_rate", "rush_td_oe": "rush_td_oe",
+    "x_pass_td_rate": "x_pass_td_rate", "pass_td_oe": "pass_td_oe",
+}
+
+WEEKLY_SEASONS_BACK = 3  # weekly game logs exported for the last N seasons
+
+
+def build_history_json(players: list[dict], fm: pd.DataFrame, weekly: pd.DataFrame) -> dict:
+    """Per-board-player career: one row per season from the feature matrix,
+    plus weekly PPR game logs for the last few seasons."""
+    ids = {p["player_id"] for p in players}
+
+    hist = fm[fm["player_id"].isin(ids)].copy()
+    usage = (
+        hist.get("targets", 0).fillna(0)
+        + hist.get("carries", 0).fillna(0)
+        + hist.get("dropbacks", 0).fillna(0)
+    )
+    hist = (
+        hist.assign(_usage=usage)
+        .sort_values("_usage", ascending=False)
+        .drop_duplicates(subset=["player_id", "season"], keep="first")
+        .sort_values(["player_id", "season"])
+    )
+
+    out: dict[str, dict] = {pid: {"seasons": [], "weekly": {}} for pid in ids}
+    cols = [(src, dst) for src, dst in _HISTORY_COLS.items() if src in hist.columns]
+    for _, r in hist.iterrows():
+        row = {"season": int(r["season"])}
+        for src, dst in cols:
+            v = r[src]
+            if isinstance(v, str):
+                row[dst] = v
+            else:
+                try:
+                    f = float(v)
+                    row[dst] = None if math.isnan(f) else round(f, 4)
+                except (TypeError, ValueError):
+                    row[dst] = None
+        out[r["player_id"]]["seasons"].append(row)
+
+    if {"player_id", "season", "week"}.issubset(weekly.columns):
+        fp_col = "fantasy_points_ppr" if "fantasy_points_ppr" in weekly.columns else "fantasy_points"
+        recent = weekly[
+            weekly["player_id"].isin(ids)
+            & (weekly["season"] >= int(weekly["season"].max()) - WEEKLY_SEASONS_BACK + 1)
+        ][["player_id", "season", "week", fp_col]].dropna(subset=[fp_col])
+        for (pid, season), grp in recent.groupby(["player_id", "season"], observed=True):
+            grp = grp.sort_values("week")
+            out[pid]["weekly"][str(int(season))] = [
+                {"week": int(w), "pts": round(float(p), 1)}
+                for w, p in zip(grp["week"], grp[fp_col])
+            ]
+    return out
+
+
 def build_adp_board(season: int, players: list[dict]) -> tuple[list[dict], dict]:
     """Full FFC ladder incl. K/DST, joined to model player_ids by name."""
     from data.adp import normalize_name
@@ -548,6 +617,7 @@ def main() -> int:
     players = build_players_json(board, features_now, extras["rookie_picks"])
     trust = build_trust_json(extras["pairs"], extras["resids"], extras["rq"])
     adp_board, adp_stats = build_adp_board(args.season, players)
+    history = build_history_json(players, extras["fm"], extras["weekly"])
 
     try:
         sha = subprocess.check_output(
@@ -583,10 +653,17 @@ def main() -> int:
             print(f"  ✗ {e}", file=sys.stderr)
         return 1
 
+    n_with_history = sum(1 for h in history.values() if h["seasons"])
+    if n_with_history < 100:
+        print(f"\nVALIDATION FAILED:\n  ✗ history.json: only {n_with_history} players "
+              "have season history", file=sys.stderr)
+        return 1
+
     write_json(out / "players.json", players)
     write_json(out / "meta.json", meta)
     write_json(out / "trust.json", trust)
     write_json(out / "adp_board.json", adp_board)
+    write_json(out / "history.json", history)
 
     by_pos = pd.Series([p["position"] for p in players]).value_counts()
     print("\n" + "=" * 62)
@@ -602,6 +679,8 @@ def main() -> int:
           f"snapshot {adp_snapshot})")
     if adp_stats["unjoined"]:
         print(f"  no projection   {', '.join(adp_stats['unjoined'])}")
+    print(f"  history.json    {n_with_history} players with season history, "
+          f"{sum(len(h['weekly']) for h in history.values())} weekly logs")
     print(f"  trust.json      {len(trust['backtest'])} backtest rows, "
           f"{len(trust['vs_market'])} market rows, "
           f"{len(trust['coverage'])} coverage rows, "
