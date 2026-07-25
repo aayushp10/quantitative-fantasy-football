@@ -73,8 +73,25 @@ changed.
 
 ## Phase 3 — UI
 
-- Accent color is a single terminal-amber (#B45309 family) used only for
+- Accent color is a single terminal-gold (#A16207) used only for
   interactive/highlight states; everything else is near-black ink on paper.
-- The range bar renders season_p10..p90 on a per-position shared scale in
-  tables (so rows are comparable within a view) and on its own scale in the
-  player header (where the labels carry the numbers).
+  Market-edge polarity uses a CVD-validated pair (#047857 / #B91C1C, deutan
+  ΔE 8.4) and every edge number carries an explicit +/− sign, so color is
+  never the only encoding. Position identity is text, not color. The look
+  is deliberately light-only.
+- The range bar renders season_p10..p90 on a shared scale per table view
+  (so rows are comparable) and on its own scale in the player header
+  (where the labels carry the numbers).
+- **Vs-market page is restricted to ADP ≤ 150.** Deep-tail players get
+  ladder-overflow model ADPs (edges of ±200) that carry no market signal
+  and drowned both leaderboards; the cutoff is stated in the page caption.
+- **Rookie player pages collapse the feature sections** (rookies have no
+  prior-season feature row — every field would be a dash) into a
+  what-the-projection-is-built-from block, plus a wider-uncertainty caveat.
+- **`vacated_share_gained` gets an in-context caveat when > 50%.** With
+  next-season rosters unsettled, unsigned teammates count as departed and
+  the feature saturates league-wide (2025 mean 0.84); the UI says to read
+  it relatively.
+- The Trust verdict sentence is generated from the numbers and explicitly
+  reconciles the two results (negative IC edge, positive L/S spread)
+  rather than cherry-picking the favorable one.

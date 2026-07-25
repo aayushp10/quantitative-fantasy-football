@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/*
+ * Research-terminal design tokens.
+ * Paper surface, near-black ink, ONE amber accent for interactive/highlight
+ * states, and a CVD-validated diverging pair for market-edge polarity
+ * (deutan ΔE 8.4 — always paired with signed numbers, never color alone).
+ * Deliberately light-only: the paper look is the identity.
+ */
+@theme {
+  --color-paper: #faf9f6;
+  --color-paper-raised: #f4f2ec;
+  --color-ink: #1c1917;
+  --color-ink-soft: #57534e;
+  --color-ink-mute: #8a8580;
+  --color-rule: #e7e3dc;
+  --color-rule-strong: #cfc9bf;
+  --color-accent: #a16207;
+  --color-accent-soft: #f4e8cd;
+  --color-edge-pos: #047857;
+  --color-edge-neg: #b91c1c;
+
+  --font-sans: "Helvetica Neue", "Inter", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace;
+}
+
+html {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+/* Tabular numerals everywhere data appears */
+.num,
+td.num,
+.font-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+::selection {
+  background: var(--color-accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Hairline data tables */
+table.data {
+  border-collapse: collapse;
+  width: 100%;
+}
+table.data th {
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-ink-mute);
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-rule-strong);
+  white-space: nowrap;
+}
+table.data td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--color-rule);
+  white-space: nowrap;
+}
+table.data th.num,
+table.data td.num {
+  text-align: right;
+}
+table.data tbody tr:hover {
+  background: var(--color-paper-raised);
+}
+
+@keyframes pick-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pick-in {
+  animation: pick-in 240ms ease-out;
+}

@@ -43,3 +43,5 @@ Thumbs.db
 webapp/data/*
 !webapp/data/.gitkeep
 webapp/data/drafts/
+node_modules/
+webapp/ui/dist/
