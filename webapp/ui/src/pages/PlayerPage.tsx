@@ -17,7 +17,7 @@ export default function PlayerPage() {
 
   return (
     <div className="max-w-4xl">
-      <Link to="/" className="text-[12px] text-accent hover:underline">
+      <Link to="/rankings" className="text-[12px] text-accent hover:underline">
         ← rankings
       </Link>
       <div className="mt-3">
