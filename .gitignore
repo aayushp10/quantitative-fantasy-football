@@ -38,3 +38,8 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# web app artifacts
+webapp/data/*
+!webapp/data/.gitkeep
+webapp/data/drafts/
