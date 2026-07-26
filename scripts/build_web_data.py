@@ -291,6 +291,74 @@ def attach_market(board: pd.DataFrame, season: int) -> pd.DataFrame:
     return board
 
 
+def attach_alpha(board: pd.DataFrame, features_now: pd.DataFrame,
+                 pairs: pd.DataFrame, season: int):
+    """Fair-value overlay from the alpha (market-residual) model.
+
+    Does NOT change the board's ranking, VORP, projections, or bot
+    behavior — the board's source of truth stays real ADP + the served
+    ensemble (user decision). Alpha rides alongside as columns:
+
+        market_points   iso(ADP) × projected games — what the price implies
+        fair_points     (market + λ·predicted residual) × games
+        alpha_points    fair − market (0 for market-only rows)
+        fair_adp        fair_points rank mapped onto the position's own
+                        current ADP ladder (same mapping as predicted_adp)
+        fair_adp_edge   adp − fair_adp (positive = market drafts him later
+                        than his fair slot — value)
+
+    Players with a price but no alpha inputs (rookies, thin histories) get
+    fair = market ("market_only"), keeping the fair ladder complete over
+    the priced universe instead of gifting veterans phantom edges.
+    """
+    from data.adp import load_adp
+    from models.alpha import build_serving_alpha
+
+    adp_history = load_adp(list(range(2013, season)))
+    adp_now = load_adp([season])
+    cur, diag, wf_df = build_serving_alpha(pairs, adp_history, adp_now, features_now)
+
+    board = board.merge(
+        cur[["player_id", "market_pg", "pred_residual_pg", "fair_pg", "alpha_source"]],
+        on="player_id", how="left",
+    )
+
+    # Price rookies / unmatched at fair = market from their real ADP
+    iso_by_pos = diag["iso_by_pos"]
+    needs = board["market_pg"].isna() & board["adp"].notna()
+    for pos, iso in iso_by_pos.items():
+        mask = needs & (board["position"] == pos)
+        if mask.any():
+            mp = iso.predict(board.loc[mask, "adp"].values)
+            board.loc[mask, "market_pg"] = mp
+            board.loc[mask, "fair_pg"] = mp
+            board.loc[mask, "alpha_source"] = "market_only"
+
+    games = board["projected_games"].fillna(17.0)
+    board["market_points"] = (board["market_pg"] * games).round(1)
+    board["fair_points"] = (board["fair_pg"] * games).round(1)
+    board["alpha_points"] = (board["fair_points"] - board["market_points"]).round(1)
+
+    # fair_points rank → the position's own current ADP ladder
+    board["fair_adp"] = np.nan
+    priced = board["fair_points"].notna() & board["adp"].notna()
+    for pos in board.loc[priced, "position"].unique():
+        pos_ladder = np.sort(adp_now.loc[adp_now["position"] == pos, "adp"].values)
+        if len(pos_ladder) == 0:
+            continue
+        sub = board[priced & (board["position"] == pos)].sort_values(
+            "fair_points", ascending=False)
+        ranks = np.arange(1, len(sub) + 1)
+        idx = np.minimum(ranks - 1, len(pos_ladder) - 1)
+        board.loc[sub.index, "fair_adp"] = np.round(pos_ladder[idx], 1)
+    board["fair_adp_edge"] = (board["adp"] - board["fair_adp"]).round(1)
+
+    n_fair = int(board["fair_points"].notna().sum())
+    print(f"alpha overlay: {n_fair} priced players "
+          f"({diag['n_scored']} model-scored, λ={diag['lambda']:.2f})")
+    return board, diag, wf_df
+
+
 def per_format_vorp(board: pd.DataFrame) -> pd.DataFrame:
     """Compute vorp/overall_rank/pos_rank/tier for every format key."""
     from models.vor import calculate_vor
@@ -392,6 +460,12 @@ def build_players_json(board: pd.DataFrame, features_now: pd.DataFrame,
             "adp": rnd(r.get("adp"), 1),
             "predicted_adp": rnd(r.get("predicted_adp"), 1),
             "adp_edge": rnd(r.get("adp_edge"), 1),
+            "market_points": rnd(r.get("market_points"), 1),
+            "fair_points": rnd(r.get("fair_points"), 1),
+            "alpha_points": rnd(r.get("alpha_points"), 1),
+            "fair_adp": rnd(r.get("fair_adp"), 1),
+            "fair_adp_edge": rnd(r.get("fair_adp_edge"), 1),
+            "alpha_source": r.get("alpha_source") if isinstance(r.get("alpha_source"), str) else None,
             "features": {
                 "target_share": rnd(fv(pid, "target_share"), 3) if pos != "QB" else None,
                 "wopr": rnd(fv(pid, "wopr"), 3) if pos in ("WR", "TE") else None,
@@ -413,6 +487,69 @@ def build_players_json(board: pd.DataFrame, features_now: pd.DataFrame,
             },
         })
     return players
+
+
+def build_alpha_trust(wf_df: pd.DataFrame, diag: dict, n_boot: int = 500) -> dict:
+    """Walk-forward alpha evidence for the trust page: per-season residual
+    IC (Spearman of predicted vs realized market error) with bootstrap CIs,
+    pooled IC, top-decile edge hit rate, incremental IC of fair over the
+    pure ADP map, and the shrinkage slope λ."""
+    from scipy.stats import spearmanr
+
+    rng = np.random.default_rng(7)
+
+    def ic_ci(pred, real):
+        pred, real = np.asarray(pred, float), np.asarray(real, float)
+        ic = float(spearmanr(pred, real).statistic)
+        n = len(pred)
+        boots = []
+        for _ in range(n_boot):
+            i = rng.integers(0, n, n)
+            if np.std(pred[i]) > 0 and np.std(real[i]) > 0:
+                boots.append(spearmanr(pred[i], real[i]).statistic)
+        lo, hi = (np.percentile(boots, [2.5, 97.5]) if boots else (np.nan, np.nan))
+        return ic, float(lo), float(hi), n
+
+    scored = wf_df[wf_df["pred_residual"].notna() & wf_df["residual"].notna()]
+    per_season = []
+    for s, grp in scored.groupby("season"):
+        ic, lo, hi, n = ic_ci(grp["pred_residual"], grp["residual"])
+        k = max(1, int(0.1 * n))
+        top = grp.reindex(grp["pred_residual"].abs().sort_values(ascending=False).index[:k])
+        hit = float((np.sign(top["pred_residual"]) == np.sign(top["residual"])).mean())
+        per_season.append({"season": int(s), "residual_ic": rnd(ic, 3),
+                           "ci_lo": rnd(lo, 3), "ci_hi": rnd(hi, 3),
+                           "n": n, "hit_rate": rnd(hit, 3)})
+
+    p_ic, p_lo, p_hi, p_n = ic_ci(scored["pred_residual"], scored["residual"])
+
+    fair = wf_df[wf_df["fair"].notna() & wf_df["next_fpts"].notna()]
+    incremental = []
+    for s, grp in fair.groupby("season"):
+        m_ic = float(spearmanr(grp["market_expected"], grp["next_fpts"]).statistic)
+        f_ic = float(spearmanr(grp["fair"], grp["next_fpts"]).statistic)
+        incremental.append({"season": int(s), "market_ic": rnd(m_ic, 3),
+                            "fair_ic": rnd(f_ic, 3), "inc_ic": rnd(f_ic - m_ic, 3),
+                            "n": int(len(grp))})
+
+    coefs = pd.Series(diag["coefficients"]).sort_values(key=np.abs, ascending=False)
+    return {
+        "lambda": rnd(diag["lambda"], 3),
+        "lambda_se": rnd(diag["lambda_se"], 3),
+        "lambda_n": int(diag["lambda_n"]),
+        "n_scored_now": int(diag["n_scored"]),
+        "n_market_only_now": int(diag["n_market_only"]),
+        "per_season": per_season,
+        "pooled": {
+            "residual_ic": rnd(p_ic, 3), "ci_lo": rnd(p_lo, 3), "ci_hi": rnd(p_hi, 3),
+            "n": p_n, "n_seasons": len(per_season),
+            "pct_seasons_positive": rnd(
+                float(np.mean([r["residual_ic"] > 0 for r in per_season])), 2)
+            if per_season else None,
+        },
+        "incremental": incremental,
+        "coefficients": [{"feature": f, "coef": rnd(c, 3)} for f, c in coefs.items()],
+    }
 
 
 def build_trust_json(pairs: pd.DataFrame, resids, rq) -> dict:
@@ -617,6 +754,14 @@ def validate(players, trust, adp_board, adp_stats) -> list[str]:
         errors.append("trust.json backtest block is empty")
     if not trust.get("vs_market"):
         errors.append("trust.json vs_market block is empty")
+    if not trust.get("alpha", {}).get("per_season"):
+        errors.append("trust.json alpha block is empty")
+    n_fair = sum(1 for p in players if p.get("fair_adp") is not None)
+    if n_fair < 100:
+        errors.append(f"only {n_fair} players carry fair_adp (expected the priced universe)")
+    n_model_alpha = sum(1 for p in players if p.get("alpha_source") == "model")
+    if n_model_alpha < 50:
+        errors.append(f"only {n_model_alpha} players are model-scored by the alpha overlay")
     # Name-matching regression gate: top-120-ADP players are always in the
     # model universe unless injured out of 2025 entirely; require >=95% there.
     # Deeper players legitimately miss feature thresholds — allow up to 15%
@@ -659,9 +804,12 @@ def main() -> int:
     board, features_now, extras = build_board(args.season)
     board = per_format_vorp(board)
     board = attach_market(board, args.season)
+    board, alpha_diag, alpha_wf = attach_alpha(
+        board, features_now, extras["pairs"], args.season)
 
     players = build_players_json(board, features_now, extras["rookie_picks"])
     trust = build_trust_json(extras["pairs"], extras["resids"], extras["rq"])
+    trust["alpha"] = build_alpha_trust(alpha_wf, alpha_diag)
     adp_board, adp_stats = build_adp_board(args.season, players)
     history = build_history_json(players, extras["fm"], extras["weekly"])
 
@@ -691,7 +839,9 @@ def main() -> int:
         "adp_format": f"{ADP_TEAMS}-team {ADP_FORMAT}",
         "stdev_synthetic": False,
         "model_stack": "v5 market ensemble (career-augmented hybrid × isotonic ADP prior); "
-                       "unsplit — adp_edge ranked by the served ensemble",
+                       "unsplit — adp_edge ranked by the served ensemble; "
+                       "alpha overlay (fair = market + λ·residual) alongside, not reranking",
+        "alpha_lambda": rnd(alpha_diag["lambda"], 2),
     }
 
     errors = validate(players, trust, adp_board, adp_stats)
