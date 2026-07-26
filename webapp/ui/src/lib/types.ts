@@ -63,6 +63,8 @@ export interface Player {
   market_points: number | null;
   fair_points: number | null;
   alpha_points: number | null;
+  alpha_z: number | null;
+  alpha_lam: number | null;
   fair_adp: number | null;
   fair_adp_edge: number | null;
   alpha_source: "model" | "market_only" | null;
@@ -109,11 +111,15 @@ export interface TrustData {
     n_seasons: number;
   }[];
   alpha?: {
-    lambda: number;
-    lambda_se: number;
-    lambda_n: number;
+    lambda_scalar: number | null;
+    lam_i_range: [number, number] | null;
     n_scored_now: number;
     n_market_only_now: number;
+    features: string[];
+    feature_selection: Record<
+      string,
+      { ic: number | null; gain: number | null; kept: boolean; coverage: number }
+    >;
     per_season: {
       season: number;
       residual_ic: number;
@@ -137,6 +143,15 @@ export interface TrustData {
       inc_ic: number;
       n: number;
     }[];
+    by_adp_bucket: {
+      bucket: string;
+      residual_ic: number;
+      ci_lo: number;
+      ci_hi: number;
+      n: number;
+    }[];
+    long_short: { season: number; long: number; short: number; spread: number; k: number }[];
+    ls_mean_spread: number | null;
     coefficients: { feature: string; coef: number }[];
   };
 }

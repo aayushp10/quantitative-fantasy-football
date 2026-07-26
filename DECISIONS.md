@@ -201,3 +201,28 @@ changed.
   evidence (per-season residual IC + CIs, incremental IC of fair over
   ADP, λ) computed fresh at build time — served numbers, not notebook
   numbers.
+- **Alpha v2: survivor-complete season-points residual.** PR 1 finally
+  landed (src/data/outcomes.py, training_pairs.py): outcomes are
+  unfiltered, thresholds apply only to the predictor season, and vanished
+  players are true zero-point seasons. The audit
+  (scripts/audit_target_universe.py) shows the old shifted-pairs
+  construction dropped 5.4% of ADP-top-150 players whose mean next season
+  was ~18 pts (vs ~188 for the kept) — the censored bust tail. The alpha
+  residual moved to season points (market prices season value), the
+  fundamental leg is hybrid PPG × availability games, candidate features
+  pass an add-one walk-forward gate (MIN_KEEP_IC_GAIN=0.005; selection is
+  data-driven per build), shrinkage is per-player
+  λᵢ = f(log_adp, adp_stdev) clipped to [0,1], and alpha_z (residual /
+  positional market-error std) is served as conviction. Honest headline
+  fell vs v1 (pooled residual IC 0.085 [0.04, 0.13] on 8 seasons vs 0.128
+  on the censored per-game target) — that is the survivorship flattery
+  coming out, not signal lost; decision-grade metrics hold: L/S spread
+  +11.4 positional ranks (mean), incremental IC positive 5/6 seasons,
+  edge concentrated in ADP 61+ buckets.
+- **2025 preseason ADP recovered from FFC via the Wayback Machine**
+  (233 rows, real stdev, 98% top-150 name match; snapshot 2025-09-06,
+  matching FFC's own final-preseason archive convention). Adds the
+  2024→2025 pair to the market layer — its residual IC (0.335) is the
+  model's best season. Durable snapshots now live in data/adp_archive/
+  (gitignore-excepted); every build copies the current-season FFC cache
+  there so the archive hole can't recur.

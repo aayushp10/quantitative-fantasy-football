@@ -154,16 +154,21 @@ export default function Trust() {
 
       {data.alpha && (
         <>
-          <SectionTitle>Can we predict the market&apos;s error? (alpha model)</SectionTitle>
+          <SectionTitle>Can we predict the market&apos;s error? (alpha model v2)</SectionTitle>
           <p className="text-[12px] text-ink-soft mb-2 max-w-3xl">
-            Walk-forward test: each season, an isotonic ADP→points curve is fitted on
-            earlier seasons only (the &ldquo;market expectation&rdquo;), and a residual model —
-            trained only on earlier seasons — predicts how each player will beat or miss
-            his price. Residual IC is the rank correlation of predicted vs realized
-            market error. The board&apos;s <span className="num">fair adp</span> column is
-            this model applied to the current draft, shrunk by λ ={" "}
-            <span className="num">{fmtDec(data.alpha.lambda, 2)}</span> (±
-            <span className="num">{fmtDec(data.alpha.lambda_se, 2)}</span>).
+            Walk-forward test on <em>survivor-complete season points</em>: every drafted
+            player&apos;s full outcome counts — including the zero-point busts the old
+            construction censored out. Each season, an isotonic ADP→season-points curve
+            is fitted on earlier seasons only (the &ldquo;market expectation&rdquo;), and a
+            residual model — trained only on earlier seasons — predicts how each player
+            will beat or miss his price. The board&apos;s{" "}
+            <span className="num">fair adp</span> column is this model applied to the
+            current draft, shrunk per player (λᵢ ∈{" "}
+            <span className="num">
+              [{data.alpha.lam_i_range ? fmtDec(data.alpha.lam_i_range[0], 2) : "–"},{" "}
+              {data.alpha.lam_i_range ? fmtDec(data.alpha.lam_i_range[1], 2) : "–"}]
+            </span>
+            {" "}— harder shrinkage where the market is confident).
           </p>
           <table className="data max-w-2xl">
             <thead>
@@ -224,8 +229,53 @@ export default function Trust() {
               ))}
             </tbody>
           </table>
-          <p className="text-[11px] text-ink-mute mt-1 max-w-3xl">
-            This season: {data.alpha.n_scored_now} priced players are model-scored;{" "}
+          <div className="flex gap-8 flex-wrap mt-3">
+            <table className="data max-w-xs">
+              <thead>
+                <tr>
+                  <th>ADP bucket</th>
+                  <th className="num">residual IC</th>
+                  <th className="num">n</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.alpha.by_adp_bucket.map((r) => (
+                  <tr key={r.bucket}>
+                    <td className="num">{r.bucket}</td>
+                    {cell(r.residual_ic, 3, true)}
+                    <td className="num text-ink-mute">{r.n}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <table className="data max-w-xs">
+              <thead>
+                <tr>
+                  <th>season</th>
+                  <th className="num" title="mean positional ranks longs beat their price by, minus the same for shorts">
+                    L/S spread (pos ranks)
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.alpha.long_short.map((r) => (
+                  <tr key={r.season}>
+                    <td className="num">{r.season}</td>
+                    {cell(r.spread, 1, true)}
+                  </tr>
+                ))}
+                <tr className="font-semibold">
+                  <td className="num">mean</td>
+                  {cell(data.alpha.ls_mean_spread, 1, true)}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-ink-mute mt-2 max-w-3xl">
+            The edge concentrates in the mid/late rounds — expect quiet fair-adp chips at
+            the top of the draft. Features surviving the add-one walk-forward gate:{" "}
+            <span className="num">{data.alpha.features.join(", ")}</span>. This season:{" "}
+            {data.alpha.n_scored_now} priced players are model-scored;{" "}
             {data.alpha.n_market_only_now} (rookies, thin histories) are carried at fair =
             market. The overlay never re-ranks the board — bots draft real ADP and the
             board ranks by the served projections; fair adp is a second opinion.

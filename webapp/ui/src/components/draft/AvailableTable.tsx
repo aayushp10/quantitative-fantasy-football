@@ -168,7 +168,16 @@ export function AvailableTable({
                 <td className={`num ${edgeClass(r.player?.adp_edge)}`}>
                   {fmtSigned(r.player?.adp_edge ?? null)}
                 </td>
-                <td className="num">
+                <td
+                  className="num"
+                  title={
+                    r.player?.alpha_source === "model"
+                      ? `conviction z ${r.player.alpha_z ?? "–"} · shrinkage λ ${r.player.alpha_lam ?? "–"}`
+                      : r.player?.alpha_source === "market_only"
+                        ? "no alpha inputs — carried at fair = market"
+                        : undefined
+                  }
+                >
                   {r.player?.fair_adp == null ? (
                     <span className="text-ink-mute">–</span>
                   ) : (
@@ -179,6 +188,16 @@ export function AvailableTable({
                         Math.abs(r.player.fair_adp_edge) >= 0.5 && (
                           <span className={`ml-1 text-[10.5px] ${edgeClass(r.player.fair_adp_edge)}`}>
                             {fmtSigned(r.player.fair_adp_edge, 0)}
+                          </span>
+                        )}
+                      {r.player.alpha_source === "model" &&
+                        r.player.alpha_z != null &&
+                        Math.abs(r.player.alpha_z) >= 1 && (
+                          <span
+                            className="ml-0.5 text-accent"
+                            aria-label="high-conviction alpha"
+                          >
+                            ●
                           </span>
                         )}
                     </>
