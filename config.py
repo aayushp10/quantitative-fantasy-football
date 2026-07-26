@@ -54,15 +54,20 @@ STANDARD_SCORING: ScoringWeights = {
 # Season configuration
 # ---------------------------------------------------------------------------
 
-TRAINING_SEASONS: list[int] = list(range(2017, 2025))  # 2017–2024 inclusive (expanded from 2020)
-PROJECTION_SEASON: int = 2025
+TRAINING_SEASONS: list[int] = list(range(2012, 2026))  # 2012–2025 inclusive
+PROJECTION_SEASON: int = 2026
+
+
+def season_length(season: int) -> int:
+    """Regular-season games: 16 through 2020, 17 from 2021 onward."""
+    return 17 if season >= 2021 else 16
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 # Feature matrix schema version — bump when adding/removing columns to auto-invalidate cache
-_FEATURE_VERSION: str = "v3"
+_FEATURE_VERSION: str = "v4"
 
 PROJECT_ROOT = Path(__file__).parent
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
@@ -153,15 +158,27 @@ DECLINING_THRESHOLD: float = -0.03
 # Model configuration
 # ---------------------------------------------------------------------------
 
-# Exponential recency decay base: weight = RECENCY_DECAY^(seasons_ago)
-RECENCY_DECAY: float = 0.7
+# Exponential recency decay base: weight = RECENCY_DECAY^(seasons_ago).
+# Relaxed from 0.7 → 0.85: era drift is now handled by per-season cross-sectional
+# z-scoring (STANDARDIZE_BY_SEASON), so old seasons no longer need to be crushed.
+RECENCY_DECAY: float = 0.85
 
 # Ridge alpha candidates for grid search
 RIDGE_ALPHA_GRID: list[float] = [0.1, 1.0, 10.0, 100.0, 1000.0]
 
-# TimeSeriesSplit parameters
+# Cross-validation: walk-forward by SEASON GROUPS (never split within a season —
+# rows in the same season share league-wide environment and would leak).
+# A validation fold is a single season; training folds are all strictly earlier seasons.
+MIN_TRAIN_SEASONS_CV: int = 3
+
+# BARRA-style factor standardization: z-score each continuous factor within its
+# season cross-section before fitting. Removes era drift (pass-rate inflation,
+# 16→17 game schedules) without discarding old sample.
+STANDARDIZE_BY_SEASON: bool = True
+
+# Legacy TimeSeriesSplit parameters (deprecated — kept for backward compat imports)
 CV_N_SPLITS: int = 4
-CV_GAP: int = 1  # prevents leakage between folds
+CV_GAP: int = 1
 
 # Position-specific projection caps (season total fantasy points)
 PROJECTION_CAPS: dict[str, float] = {
@@ -189,6 +206,20 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "team_changed",
         "years_in_league",
         "weekly_fpts_cv",
+        # Expected-TD geometry (v4)
+        "x_pass_td_rate",
+        "pass_td_oe",
+        # Career-to-date (v5)
+        "seasons_played_todate",
+        "career_fpts_pg",
+        "peak_fpts_pg",
+        "fpts_pg_prev",
+        "fpts_pg_yoy_change",
+        "durability_todate",
+        # Forward-looking schedule context (v5)
+        "vegas_implied_pts_next",
+        "vegas_implied_delta_next",
+        "hc_changed_next",
     ],
     "RB": [
         "rush_share",
@@ -220,6 +251,27 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "team_vacated_carry_share",
         "team_vacated_target_share",
         "top_departed_target_share",
+        # Expected-TD geometry + routes (v4)
+        "x_rush_td_rate",
+        "rush_td_oe",
+        "x_rec_td_rate",
+        "rec_td_oe",
+        "tprr",
+        "route_participation",
+        # Career-to-date (v5)
+        "seasons_played_todate",
+        "career_fpts_pg",
+        "peak_fpts_pg",
+        "fpts_pg_prev",
+        "peak_rush_share",
+        "peak_target_share",
+        "rush_share_prev",
+        "fpts_pg_yoy_change",
+        "durability_todate",
+        # Forward-looking schedule context (v5)
+        "vegas_implied_pts_next",
+        "vegas_implied_delta_next",
+        "hc_changed_next",
     ],
     "WR": [
         "target_share",
@@ -254,6 +306,24 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "team_vacated_target_share",
         "top_departed_target_share",
         "topdown_fpts_pg",
+        # Expected-TD geometry + routes (v4)
+        "x_rec_td_rate",
+        "rec_td_oe",
+        "tprr",
+        "route_participation",
+        # Career-to-date (v5)
+        "seasons_played_todate",
+        "career_fpts_pg",
+        "peak_fpts_pg",
+        "fpts_pg_prev",
+        "peak_target_share",
+        "target_share_prev",
+        "fpts_pg_yoy_change",
+        "durability_todate",
+        # Forward-looking schedule context (v5)
+        "vegas_implied_pts_next",
+        "vegas_implied_delta_next",
+        "hc_changed_next",
     ],
     "TE": [
         "target_share",
@@ -280,6 +350,24 @@ POSITION_FEATURES: dict[str, list[str]] = {
         "team_vacated_target_share",
         "top_departed_target_share",
         "topdown_fpts_pg",
+        # Expected-TD geometry + routes (v4)
+        "x_rec_td_rate",
+        "rec_td_oe",
+        "tprr",
+        "route_participation",
+        # Career-to-date (v5)
+        "seasons_played_todate",
+        "career_fpts_pg",
+        "peak_fpts_pg",
+        "fpts_pg_prev",
+        "peak_target_share",
+        "target_share_prev",
+        "fpts_pg_yoy_change",
+        "durability_todate",
+        # Forward-looking schedule context (v5)
+        "vegas_implied_pts_next",
+        "vegas_implied_delta_next",
+        "hc_changed_next",
     ],
 }
 
@@ -290,6 +378,11 @@ POSITION_FEATURES: dict[str, list[str]] = {
 # Separate alpha grids: volume signals are persistent (low alpha), efficiency noisy (high alpha)
 VOLUME_RIDGE_ALPHA_GRID: list[float] = [0.1, 1.0, 10.0]
 EFFICIENCY_RIDGE_ALPHA_GRID: list[float] = [10.0, 100.0, 1000.0]
+
+# --- Legacy fixed shrinkage weights -----------------------------------------
+# These are now FALLBACKS only. The two-stage model fits empirical-Bayes priors
+# (models/shrinkage.py) whose shrinkage is sample-size dependent; the constants
+# below are used when EB fitting fails (missing trials columns, tiny samples).
 
 # TD rate mean reversion weight (0 = pure model, 1 = pure positional mean)
 TD_REGRESSION_WEIGHT: float = 0.55
@@ -316,6 +409,8 @@ VOLUME_FEATURES: dict[str, list[str]] = {
     "QB": [
         "epa_per_dropback", "cpoe", "team_pace", "rush_attempt_share",
         "games_played", "team_changed", "context_delta_pace", "target_share_delta",
+        "seasons_played_todate", "durability_todate",
+        "vegas_implied_pts_next", "vegas_implied_delta_next", "hc_changed_next",
     ],
     "RB": [
         "rush_share", "target_share", "snap_percentage", "team_pace",
@@ -323,6 +418,8 @@ VOLUME_FEATURES: dict[str, list[str]] = {
         "target_share_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
         "qb_epa_per_dropback", "team_vacated_carry_share", "team_vacated_target_share",
+        "peak_rush_share", "rush_share_prev", "seasons_played_todate", "durability_todate",
+        "vegas_implied_pts_next", "vegas_implied_delta_next", "hc_changed_next",
     ],
     "WR": [
         "target_share", "air_yard_share", "wopr", "snap_percentage",
@@ -330,6 +427,9 @@ VOLUME_FEATURES: dict[str, list[str]] = {
         "target_share_delta", "wopr_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
         "qb_epa_per_dropback", "qb_changed", "team_vacated_target_share", "top_departed_target_share",
+        "tprr", "route_participation",
+        "peak_target_share", "target_share_prev", "seasons_played_todate", "durability_todate",
+        "vegas_implied_pts_next", "vegas_implied_delta_next", "hc_changed_next",
     ],
     "TE": [
         "target_share", "air_yard_share", "snap_percentage", "team_pace",
@@ -337,6 +437,9 @@ VOLUME_FEATURES: dict[str, list[str]] = {
         "target_share_delta", "snap_trend", "games_played",
         "draft_round_bucket", "years_in_league",
         "qb_epa_per_dropback", "qb_changed", "team_vacated_target_share",
+        "tprr", "route_participation",
+        "peak_target_share", "target_share_prev", "seasons_played_todate", "durability_todate",
+        "vegas_implied_pts_next", "vegas_implied_delta_next", "hc_changed_next",
     ],
 }
 
@@ -362,3 +465,71 @@ AGE_DECAY_RATES: dict[str, float] = {
     "WR": 0.018,
     "TE": 0.016,
 }
+
+# ---------------------------------------------------------------------------
+# Empirical-Bayes shrinkage (models/shrinkage.py)
+# ---------------------------------------------------------------------------
+
+# Minimum trials (targets/carries/dropbacks) for a player-season to inform priors
+EB_MIN_TRIALS: int = 10
+
+# Bounds on the fitted prior strength (equivalent prior sample size).
+# Prevents degenerate fits: k below → almost no shrinkage; k above → everyone
+# collapses to the positional mean.
+EB_PRIOR_STRENGTH_BOUNDS: tuple[float, float] = (10.0, 5000.0)
+
+# Trials column in the feature matrix backing each rate metric
+EB_TRIALS_COLUMNS: dict[str, str] = {
+    "rec_td_rate":            "targets",
+    "rush_td_rate":           "carries",
+    "pass_td_rate":           "dropbacks",
+    "catch_rate":             "targets",
+    "yards_per_target":       "targets",
+    "ypc":                    "carries",
+    "pass_yards_per_attempt": "dropbacks",
+}
+
+# Metrics treated as binomial successes/trials (beta-binomial prior);
+# the rest use a normal-normal hierarchical prior.
+EB_BINOMIAL_METRICS: set[str] = {
+    "rec_td_rate", "rush_td_rate", "pass_td_rate", "catch_rate",
+}
+
+# Player-specific prior means from usage geometry (expected-TD model):
+# when the x-column exists, the EB prior centers on the player's own
+# field-position-implied rate instead of the flat positional mean.
+EB_GEOMETRY_PRIORS: dict[str, str] = {
+    "rec_td_rate":  "x_rec_td_rate",
+    "rush_td_rate": "x_rush_td_rate",
+    "pass_td_rate": "x_pass_td_rate",
+}
+
+# ---------------------------------------------------------------------------
+# Availability (games played) model — models/availability.py
+# ---------------------------------------------------------------------------
+
+# Clip projected games to this fraction range of the season length
+AVAILABILITY_MIN_GAMES_FRAC: float = 0.25
+AVAILABILITY_MAX_GAMES_FRAC: float = 1.0
+
+# ---------------------------------------------------------------------------
+# Market data (ADP) — data/adp.py, models/market.py
+# ---------------------------------------------------------------------------
+
+ADP_FORMAT: str = "ppr"          # ppr | half-ppr | standard | 2qb
+ADP_TEAMS: int = 12
+ADP_SOURCE_URL: str = "https://fantasyfootballcalculator.com/api/v1/adp/{fmt}?teams={teams}&year={year}"
+
+# Long/short residual-vs-market test: fraction of each position taken per side
+MARKET_LS_TOP_FRAC: float = 0.2
+
+# ---------------------------------------------------------------------------
+# Rookie model — models/rookie.py
+# ---------------------------------------------------------------------------
+
+# First draft class with reliable supporting data in the pipeline
+ROOKIE_TRAIN_START: int = 2013
+
+# Rookies below this draft position get floored volume expectations anyway;
+# beyond pick ~260 is UDFA territory (excluded)
+ROOKIE_MAX_DRAFT_PICK: int = 262

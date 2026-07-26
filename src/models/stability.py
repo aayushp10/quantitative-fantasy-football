@@ -84,6 +84,7 @@ def compute_factor_stability(
                 "mean_ic": np.nan,
                 "std_ic": np.nan,
                 "ic_ir": np.nan,
+                "pct_positive": np.nan,
                 "pearson_r": np.nan,
                 "n_seasons": 0,
                 "stability_tier": "INSUFFICIENT DATA",
@@ -93,6 +94,10 @@ def compute_factor_stability(
         mean_ic = np.mean(ics)
         std_ic = np.std(ics)
         ic_ir = mean_ic / std_ic if std_ic > 0 else np.nan
+        # Sign consistency: fraction of seasons where the IC was positive.
+        # A factor at 0.9 predicts the right direction almost every year;
+        # one at 0.5 flips sign season to season regardless of its mean.
+        pct_positive = float(np.mean([ic > 0 for ic in ics]))
 
         # Pearson as robustness check
         all_valid = yoy_df[[factor, target]].dropna()
@@ -113,6 +118,7 @@ def compute_factor_stability(
             "mean_ic": mean_ic,
             "std_ic": std_ic,
             "ic_ir": ic_ir,
+            "pct_positive": pct_positive,
             "pearson_r": pearson_r,
             "n_seasons": len(ics),
             "stability_tier": tier,

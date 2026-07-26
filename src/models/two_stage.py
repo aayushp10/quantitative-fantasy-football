@@ -15,9 +15,13 @@ Combination: volume × efficiency → fpts_per_game
 
 Key design choices:
 - Volume models use LOW alpha (persistent signals: target_share IC≈0.30)
-- Efficiency models use HIGH alpha (noisy signals: EPA per target IC≈0.10)
-- TD rates regressed 55% toward positional mean to correct for luck
-- Catch rate regressed 30% toward positional mean
+- Efficiency stage uses EMPIRICAL-BAYES shrinkage (models/shrinkage.py):
+  posterior = (k*prior + n*obs)/(k+n) with k fitted per (position, metric),
+  so shrinkage is sample-size dependent. TD-rate priors center on the
+  player's own geometry-implied x-rate (features/expected_td.py) when
+  available. The old fixed weights (0.55/0.30) remain as fallbacks.
+- Features are z-scored within season cross-sections; CV folds are whole
+  seasons (walk-forward), never within-season splits.
 
 Public API is identical to FantasyProjectionModel:
   model.train(yoy_df)
@@ -35,28 +39,32 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import spearmanr
 
 from config import (
     CATCH_RATE_REGRESSION_WEIGHT,
-    CV_GAP,
-    CV_N_SPLITS,
+    EB_GEOMETRY_PRIORS,
     EFFICIENCY_FEATURES,
     EFFICIENCY_REGRESSION_WEIGHTS,
     EFFICIENCY_RIDGE_ALPHA_GRID,
+    MIN_TRAIN_SEASONS_CV,
     POSITIONS,
     PPR_SCORING,
     PROJECTION_CAPS,
     RECENCY_DECAY,
+    STANDARDIZE_BY_SEASON,
     TD_REGRESSION_WEIGHT,
     VOLUME_FEATURES,
     VOLUME_RIDGE_ALPHA_GRID,
 )
 from features.assembler import build_yoy_pairs
+from features.standardize import SeasonStandardizer
 from models.age_curves import apply_age_adjustments, fit_age_curves
+from models.shrinkage import EmpiricalBayesShrinker
+from models.validation import season_walk_forward_folds
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +86,13 @@ EFFICIENCY_TARGETS: dict[str, list[str]] = {
 }
 
 # All target columns that need to be shifted in build_yoy_pairs
+# (games_played included so the availability model can train on next_games_played)
 ALL_RATE_TARGET_COLS: list[str] = [
     "targets_per_game", "carries_per_game", "dropbacks_per_game",
     "yards_per_target", "ypc", "rec_td_rate", "rush_td_rate",
     "pass_yards_per_attempt", "pass_td_rate",
     "catch_rate",
+    "games_played",
 ]
 
 
@@ -90,20 +100,19 @@ ALL_RATE_TARGET_COLS: list[str] = [
 # Pipeline helpers
 # ---------------------------------------------------------------------------
 
-def _build_pipeline(alpha_grid: list[float], n_splits: int) -> GridSearchCV | Pipeline:
-    """Build a GridSearchCV pipeline with the given alpha grid."""
+def _build_pipeline(alpha_grid: list[float], folds) -> GridSearchCV | Pipeline:
+    """Build a GridSearchCV pipeline over season-grouped walk-forward folds."""
     pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
         ("ridge", Ridge()),
     ])
-    if n_splits < 2:
+    if not folds or len(folds) < 2:
         return pipe
-    cv = TimeSeriesSplit(n_splits=n_splits, gap=CV_GAP)
     return GridSearchCV(
         pipe,
         {"ridge__alpha": alpha_grid},
-        cv=cv,
+        cv=folds,
         scoring="neg_mean_absolute_error",
         refit=True,
     )
@@ -120,10 +129,14 @@ def _fit_model(
     alpha_grid: list[float],
     max_season: int,
     label: str = "",
-) -> tuple[Any | None, float | None]:
+    standardize: bool = STANDARDIZE_BY_SEASON,
+) -> tuple[dict[str, Any] | None, float | None]:
     """
     Fit a single Ridge model for a position-target pair.
-    Returns (fitted_model_or_pipeline, best_alpha) or (None, None) on failure.
+
+    Returns (entry, best_alpha) or (None, None) on failure, where entry is
+    {"model": pipeline, "features": [...], "std": SeasonStandardizer | None}
+    — everything predict-time needs to reproduce the training transform.
     """
     avail_features = [f for f in feature_cols if f in pos_df.columns]
     avail_target = target_col in pos_df.columns
@@ -135,13 +148,21 @@ def _fit_model(
     if len(df) < 5:
         return None, None
 
-    df = df.sort_values("season")
-    X = df[avail_features].values
-    y = df[target_col].values
+    df = df.sort_values("season").reset_index(drop=True)
+
+    std = None
+    if standardize:
+        std = SeasonStandardizer().fit(df, avail_features)
+        df_t = std.transform(df)
+    else:
+        df_t = df
+
+    X = df_t[avail_features].values
+    y = df_t[target_col].values
     weights = _compute_sample_weights(df["season"], max_season)
 
-    n_splits = min(CV_N_SPLITS, len(df) // 2)
-    model = _build_pipeline(alpha_grid, n_splits)
+    folds = season_walk_forward_folds(df["season"].values, MIN_TRAIN_SEASONS_CV)
+    model = _build_pipeline(alpha_grid, folds)
 
     try:
         if isinstance(model, GridSearchCV):
@@ -159,7 +180,20 @@ def _fit_model(
         warnings.warn(f"Model fitting failed for {label}: {e}")
         return None, None
 
-    return fitted, best_alpha
+    entry = {"model": fitted, "features": avail_features, "std": std}
+    return entry, best_alpha
+
+
+def _predict_entry(entry: dict[str, Any], features_df: pd.DataFrame) -> np.ndarray:
+    """Predict from a fitted entry, reproducing the training-time transform."""
+    df = features_df.copy()
+    if entry.get("std") is not None:
+        df = entry["std"].transform(df)
+    for f in entry["features"]:
+        if f not in df.columns:
+            df[f] = np.nan
+    X = df[entry["features"]].values
+    return entry["model"].predict(X)
 
 
 # ---------------------------------------------------------------------------
@@ -179,17 +213,21 @@ class TwoStageProjectionModel:
     Public API is identical to FantasyProjectionModel.
     """
 
-    def __init__(self, age_adjust: bool = True):
+    def __init__(self, age_adjust: bool = True, standardize: bool = STANDARDIZE_BY_SEASON):
         self.age_adjust = age_adjust
-        # {pos: {target_col: fitted_pipeline}}
+        self.standardize = standardize
+        # {pos: {target_col: entry dict from _fit_model}}
         self._volume_models: dict[str, dict[str, Any]] = {}
         self._efficiency_models: dict[str, dict[str, Any]] = {}
-        # Mean TD rates and catch rates computed from training data
+        # Empirical-Bayes shrinker for efficiency rates (fitted in train)
+        self._eb: EmpiricalBayesShrinker | None = None
+        # Mean TD rates and catch rates computed from training data (fallbacks)
         self._mean_td_rates: dict[str, dict[str, float]] = {}
         self._mean_catch_rates: dict[str, float] = {}
-        # Positional medians for all efficiency targets (for regressed efficiency)
+        # Positional medians for all efficiency targets (fixed-weight fallback)
         self._positional_means: dict[str, dict[str, float]] = {}
         self._fitted_age_params: dict | None = None
+        self._uncertainty = None             # optional models.uncertainty.ResidualQuantiles
 
     # ------------------------------------------------------------------
     # Training
@@ -219,15 +257,23 @@ class TwoStageProjectionModel:
             raise ValueError("yoy_df must have a 'position' column.")
 
         if fit_age and self.age_adjust:
-            print("Fitting age curves...")
+            print("Fitting age curves (delta method)...")
             try:
-                self._fitted_age_params = fit_age_curves(
-                    yoy_df.rename(columns={target: "fpts_per_game"})
-                )
+                # YoY pairs passed as-is: each row is one within-player transition
+                self._fitted_age_params = fit_age_curves(yoy_df)
             except Exception as e:
                 warnings.warn(f"Age curve fitting failed: {e}. Using hardcoded priors.")
 
         max_season = int(yoy_df["season"].max())
+
+        # ----- Empirical-Bayes priors for efficiency rates (all positions) -----
+        try:
+            self._eb = EmpiricalBayesShrinker().fit(yoy_df)
+            n_priors = len(self._eb.shrinkage_table())
+            print(f"  Fitted {n_priors} empirical-Bayes rate priors")
+        except Exception as e:
+            warnings.warn(f"EB prior fitting failed: {e}. Using fixed-weight fallback.")
+            self._eb = None
 
         for pos in POSITIONS:
             pos_df = yoy_df[yoy_df["position"] == pos].copy()
@@ -240,16 +286,17 @@ class TwoStageProjectionModel:
             self._volume_models[pos] = {}
             for vol_target in VOLUME_TARGETS.get(pos, []):
                 shifted_col = f"next_{vol_target}"
-                model, alpha = _fit_model(
+                entry, alpha = _fit_model(
                     pos_df,
                     feature_cols=VOLUME_FEATURES.get(pos, []),
                     target_col=shifted_col,
                     alpha_grid=VOLUME_RIDGE_ALPHA_GRID,
                     max_season=max_season,
                     label=f"{pos}/volume/{vol_target}",
+                    standardize=self.standardize,
                 )
-                if model is not None:
-                    self._volume_models[pos][vol_target] = model
+                if entry is not None:
+                    self._volume_models[pos][vol_target] = entry
                     print(f"    vol/{vol_target}: alpha={alpha}")
 
             # ----- Positional medians for all efficiency metrics -----
@@ -265,19 +312,21 @@ class TwoStageProjectionModel:
             if use_ridge_efficiency:
                 for eff_target in EFFICIENCY_TARGETS.get(pos, []):
                     shifted_col = f"next_{eff_target}"
-                    model, alpha = _fit_model(
+                    entry, alpha = _fit_model(
                         pos_df,
                         feature_cols=EFFICIENCY_FEATURES.get(pos, []),
                         target_col=shifted_col,
                         alpha_grid=EFFICIENCY_RIDGE_ALPHA_GRID,
                         max_season=max_season,
                         label=f"{pos}/efficiency/{eff_target}",
+                        standardize=self.standardize,
                     )
-                    if model is not None:
-                        self._efficiency_models[pos][eff_target] = model
+                    if entry is not None:
+                        self._efficiency_models[pos][eff_target] = entry
                         print(f"    eff/{eff_target}: alpha={alpha}")
             else:
-                print(f"    eff: using regressed historical rates (use_ridge_efficiency=False)")
+                eb_note = "EB-shrunk" if self._eb is not None else "fixed-weight regressed"
+                print(f"    eff: using {eb_note} historical rates (use_ridge_efficiency=False)")
 
             # ----- TD rate means (for legacy _predict_efficiency_ridge) -----
             self._mean_td_rates[pos] = {}
@@ -302,29 +351,42 @@ class TwoStageProjectionModel:
     def _predict_volume(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
         """Return {vol_target: array_of_predictions} for all volume targets."""
         preds = {}
-        for vol_target, model in self._volume_models.get(pos, {}).items():
-            feat_cols = [f for f in VOLUME_FEATURES.get(pos, []) if f in features_df.columns]
-            if not feat_cols:
+        for vol_target, entry in self._volume_models.get(pos, {}).items():
+            try:
+                raw = _predict_entry(entry, features_df)
+            except Exception:
                 continue
-            X = features_df[feat_cols].values
-            raw = model.predict(X)
             preds[vol_target] = np.maximum(0.0, raw)
         return preds
 
     def _regressed_efficiency(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
         """
-        Return per-player efficiency estimates via positional median regression.
+        Per-player efficiency estimates.
 
-        For each efficiency metric:
-          regressed = reg_weight × positional_median + (1 - reg_weight) × player_historical_rate
+        Preferred path — empirical Bayes (sample-size-dependent shrinkage):
+          posterior = (k*prior + n*obs)/(k+n), with k fitted per (position,
+          metric). TD-rate priors center on the player's geometry-implied
+          x-rate (EB_GEOMETRY_PRIORS) when that column is present.
 
-        Regression weights are from EFFICIENCY_REGRESSION_WEIGHTS in config.
-        Higher weights pull more strongly toward the mean (used for noisier metrics like TD rates).
-        Missing player values fall back to the positional median.
+        Fallback — fixed-weight regression toward the positional median using
+        EFFICIENCY_REGRESSION_WEIGHTS (the pre-EB behavior), used when no EB
+        prior could be fitted for a metric.
         """
         preds = {}
         n = len(features_df)
         for eff_col in EFFICIENCY_TARGETS.get(pos, []):
+            # --- Empirical-Bayes path ---
+            if self._eb is not None and self._eb.has(pos, eff_col):
+                prior_mean = None
+                geo_col = EB_GEOMETRY_PRIORS.get(eff_col)
+                if geo_col and geo_col in features_df.columns:
+                    prior_mean = features_df[geo_col]
+                shrunk = self._eb.shrink(features_df, pos, eff_col, prior_mean=prior_mean)
+                if shrunk is not None:
+                    preds[eff_col] = shrunk
+                    continue
+
+            # --- Fixed-weight fallback ---
             reg_w = EFFICIENCY_REGRESSION_WEIGHTS.get(eff_col, 0.40)
             pos_mean = self._positional_means.get(pos, {}).get(eff_col, np.nan)
             if np.isnan(pos_mean):
@@ -339,12 +401,11 @@ class TwoStageProjectionModel:
     def _predict_efficiency_ridge(self, pos: str, features_df: pd.DataFrame) -> dict[str, np.ndarray]:
         """Ridge-based efficiency predictions (kept for comparison; unreliable due to small samples)."""
         preds = {}
-        for eff_target, model in self._efficiency_models.get(pos, {}).items():
-            feat_cols = [f for f in EFFICIENCY_FEATURES.get(pos, []) if f in features_df.columns]
-            if not feat_cols:
+        for eff_target, entry in self._efficiency_models.get(pos, {}).items():
+            try:
+                raw = np.maximum(0.0, _predict_entry(entry, features_df))
+            except Exception:
                 continue
-            X = features_df[feat_cols].values
-            raw = np.maximum(0.0, model.predict(X))
 
             # TD rate mean reversion
             if eff_target in self._mean_td_rates.get(pos, {}):
@@ -355,7 +416,12 @@ class TwoStageProjectionModel:
         return preds
 
     def _get_catch_rate(self, pos: str, features_df: pd.DataFrame) -> np.ndarray:
-        """Get catch rate with mean reversion, falling back to positional mean."""
+        """Catch rate estimate: EB-shrunk when a prior is fitted, else fixed-weight."""
+        if self._eb is not None and self._eb.has(pos, "catch_rate"):
+            shrunk = self._eb.shrink(features_df, pos, "catch_rate")
+            if shrunk is not None:
+                return np.clip(shrunk, 0.0, 1.0)
+
         pos_mean = self._mean_catch_rates.get(pos, 0.65)
         if "catch_rate" in features_df.columns:
             cr = features_df["catch_rate"].fillna(pos_mean).values.astype(float)
@@ -365,6 +431,29 @@ class TwoStageProjectionModel:
         else:
             cr = np.full(len(features_df), pos_mean)
         return cr
+
+    def predict_position(self, pos: str, pos_df: pd.DataFrame) -> np.ndarray | None:
+        """
+        Predict fpts_per_game for a single position's frame — the one
+        prediction path shared by project(), backtests, and the hybrid blend.
+        """
+        pos_df = pos_df.reset_index(drop=True)
+        n = len(pos_df)
+        if n == 0:
+            return None
+
+        vol_preds = self._predict_volume(pos, pos_df)
+        eff_preds = self._regressed_efficiency(pos, pos_df)
+        if not vol_preds and not eff_preds:
+            return None
+
+        catch_rate = self._get_catch_rate(pos, pos_df)
+        return self._combine_to_fpts(pos, vol_preds, eff_preds, catch_rate, n)
+
+    def set_uncertainty(self, residual_quantiles) -> "TwoStageProjectionModel":
+        """Attach a fitted models.uncertainty.ResidualQuantiles for real intervals."""
+        self._uncertainty = residual_quantiles
+        return self
 
     def _combine_to_fpts(
         self,
@@ -447,22 +536,21 @@ class TwoStageProjectionModel:
                 continue
             n = len(pos_df)
 
-            vol_preds = self._predict_volume(pos, pos_df)
-            eff_preds = self._regressed_efficiency(pos, pos_df)
-
-            if not vol_preds and not eff_preds:
+            fpts_pg = self.predict_position(pos, pos_df)
+            if fpts_pg is None:
                 continue
-
-            catch_rate = self._get_catch_rate(pos, pos_df)
-            fpts_pg = self._combine_to_fpts(pos, vol_preds, eff_preds, catch_rate, n)
 
             # Apply per-game cap
             cap_pg = PROJECTION_CAPS.get(pos, 400.0) / projected_games
             fpts_pg = np.clip(fpts_pg, 0.0, cap_pg)
 
-            resid_std = fpts_pg.std() * 0.4
-            ci_low = np.maximum(0.0, fpts_pg - 1.28 * resid_std)
-            ci_high = fpts_pg + 1.28 * resid_std
+            if self._uncertainty is not None:
+                ci_low = np.maximum(0.0, self._uncertainty.interval(pos, fpts_pg, 0.10))
+                ci_high = self._uncertainty.interval(pos, fpts_pg, 0.90)
+            else:
+                resid_std = fpts_pg.std() * 0.4
+                ci_low = np.maximum(0.0, fpts_pg - 1.28 * resid_std)
+                ci_high = fpts_pg + 1.28 * resid_std
 
             for i in range(n):
                 row = {
@@ -541,14 +629,12 @@ class TwoStageProjectionModel:
                 continue
 
             n = len(pos_test)
+            fpts_pg = bt_model.predict_position(pos, pos_test)
+            if fpts_pg is None:
+                continue
+            # Stage-level diagnostics still need the pieces
             vol_preds = bt_model._predict_volume(pos, pos_test)
             eff_preds = bt_model._regressed_efficiency(pos, pos_test)
-
-            if not vol_preds and not eff_preds:
-                continue
-
-            catch_rate = bt_model._get_catch_rate(pos, pos_test)
-            fpts_pg = bt_model._combine_to_fpts(pos, vol_preds, eff_preds, catch_rate, n)
 
             y_actual = pos_test[target].values
             valid = ~np.isnan(y_actual) & ~np.isnan(fpts_pg)
@@ -617,19 +703,24 @@ class TwoStageProjectionModel:
         """
         rows = []
 
-        for stage, models_dict, features_dict in [
-            ("volume", self._volume_models, VOLUME_FEATURES),
-            ("efficiency", self._efficiency_models, EFFICIENCY_FEATURES),
+        for stage, models_dict in [
+            ("volume", self._volume_models),
+            ("efficiency", self._efficiency_models),
         ]:
-            for target_col, model in models_dict.get(position, {}).items():
-                pipe = model.best_estimator_ if hasattr(model, "best_estimator_") else model
+            for target_col, entry in models_dict.get(position, {}).items():
+                pipe = entry["model"]
+                if hasattr(pipe, "best_estimator_"):
+                    pipe = pipe.best_estimator_
                 ridge: Ridge = pipe.named_steps["ridge"]
-                feat_names = [f for f in features_dict.get(position, []) if f in (
-                    # approximate: use the feature list from config
-                    features_dict.get(position, [])
-                )]
+                feat_names = entry["features"]  # exact training columns
                 coefs = ridge.coef_
-                for fname, coef in zip(feat_names[:len(coefs)], coefs[:len(feat_names)]):
+                rows.append({
+                    "model_stage": f"{stage}/{target_col}",
+                    "feature": "(intercept)",
+                    "coefficient": float(ridge.intercept_),
+                    "abs_coefficient": np.nan,
+                })
+                for fname, coef in zip(feat_names, coefs):
                     rows.append({
                         "model_stage": f"{stage}/{target_col}",
                         "feature": fname,

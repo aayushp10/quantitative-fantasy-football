@@ -65,30 +65,65 @@ def get_age_multiplier(position: str, age: float) -> float:
 # Empirical curve fitting
 # ---------------------------------------------------------------------------
 
+def _age_deltas(pos_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Within-player year-over-year (age, delta fpts_per_game) pairs.
+
+    Accepts either YoY pairs (has 'next_fpts': each row is already a
+    transition) or a raw feature matrix (consecutive seasons are paired
+    within player via shift).
+    """
+    if "next_fpts" in pos_df.columns:
+        df = pos_df.dropna(subset=["age", "fpts_per_game", "next_fpts"]).copy()
+        df["_delta"] = df["next_fpts"] - df["fpts_per_game"]
+        return df[["age", "_delta"]]
+
+    df = pos_df.dropna(subset=["age", "fpts_per_game"]).copy()
+    df = df.sort_values(["player_id", "season"])
+    grp = df.groupby("player_id", observed=True)
+    df["_next_val"] = grp["fpts_per_game"].shift(-1)
+    df["_next_season"] = grp["season"].shift(-1)
+    df = df[(df["_next_season"] == df["season"] + 1) & df["_next_val"].notna()]
+    df["_delta"] = df["_next_val"] - df["fpts_per_game"]
+    return df[["age", "_delta"]]
+
+
 def fit_age_curves(
     features_df: pd.DataFrame,
-    min_player_seasons: int = 50,
+    min_pairs: int = 50,
+    min_pairs_per_age: int = 8,
+    age_range: tuple[int, int] = (21, 38),
 ) -> dict[str, dict[str, float]]:
     """
-    Fit empirical aging curves from the feature matrix.
+    Fit empirical aging curves via the DELTA METHOD.
 
-    For each position, fit a quadratic curve to the (age, fpts_per_game)
-    data using scipy.optimize.curve_fit. Falls back to hardcoded priors
-    when fewer than min_player_seasons data points are available.
+    The old cross-sectional fit (level vs age) had textbook survivorship
+    bias: bad old players retire out of the sample, so the survivors at 30+
+    are disproportionately elite — dragging apparent peaks to absurd ages
+    (WR 29.6, TE 30.2 on 2012-2024 data) with maxed-out decay to compensate.
+
+    The delta method is immune to that selection: it uses only WITHIN-player
+    year-over-year changes ("how did the same player change from age A to
+    A+1"), averages the deltas per age, integrates them into a relative
+    level curve, and fits the quadratic to THAT curve.
 
     Parameters
     ----------
     features_df : pd.DataFrame
-        Output from assemble_feature_matrix(). Must have columns:
-        'position', 'age', 'fpts_per_game'.
-    min_player_seasons : int
-        Minimum data points required to fit a curve for a position.
+        Either YoY pairs (preferred — each row is a transition with
+        'fpts_per_game', 'next_fpts', 'age') or a feature matrix with
+        'player_id', 'season', 'age', 'fpts_per_game'.
+    min_pairs : int
+        Minimum transitions per position; below this, hardcoded priors.
+    min_pairs_per_age : int
+        Age buckets with fewer transitions are dropped from the fit.
+    age_range : tuple
+        Ages considered.
 
     Returns
     -------
     dict
         {position: {'peak_age': float, 'decay_rate': float}}
-        These can be passed to get_age_multiplier() to override priors.
     """
     required = {"position", "age", "fpts_per_game"}
     missing = required - set(features_df.columns)
@@ -98,43 +133,57 @@ def fit_age_curves(
     fitted = {}
 
     for pos in POSITIONS:
-        pos_df = features_df[
-            (features_df["position"] == pos) &
-            features_df["age"].notna() &
-            features_df["fpts_per_game"].notna()
-        ].copy()
+        prior = {"peak_age": PEAK_AGES[pos], "decay_rate": AGE_DECAY_RATES[pos]}
+        pos_df = features_df[features_df["position"] == pos]
 
-        if len(pos_df) < min_player_seasons:
+        deltas = _age_deltas(pos_df)
+        deltas = deltas[deltas["age"].between(*age_range)]
+        if len(deltas) < min_pairs:
             warnings.warn(
-                f"Only {len(pos_df)} data points for {pos} (need {min_player_seasons}). "
+                f"Only {len(deltas)} age transitions for {pos} (need {min_pairs}). "
                 "Using hardcoded priors."
             )
-            fitted[pos] = {"peak_age": PEAK_AGES[pos], "decay_rate": AGE_DECAY_RATES[pos]}
+            fitted[pos] = prior
             continue
 
-        # Normalize fpts_per_game to [0, 1] range for fitting
-        max_fpts = pos_df["fpts_per_game"].quantile(0.95)
-        pos_df["fpts_norm"] = (pos_df["fpts_per_game"] / max_fpts).clip(0, 1.5)
+        # Mean delta per integer age (age at the START of the transition)
+        deltas["_age_i"] = deltas["age"].round().astype(int)
+        by_age = deltas.groupby("_age_i")["_delta"].agg(["mean", "count"])
+        by_age = by_age[by_age["count"] >= min_pairs_per_age]
+        if len(by_age) < 4:
+            fitted[pos] = prior
+            continue
 
-        ages = pos_df["age"].values
-        fpts = pos_df["fpts_norm"].values
+        # Integrate deltas into a relative level curve: level at the youngest
+        # age is arbitrary; cumulative deltas trace the shape from there.
+        ages = np.append(by_age.index.values, by_age.index.values[-1] + 1)
+        levels = np.concatenate([[0.0], np.cumsum(by_age["mean"].values)])
+        levels = levels - levels.max()
+
+        # Convert to multiplicative scale: peak level -> 1.0. Typical
+        # positional per-game scale keeps proportions comparable.
+        scale = max(pos_df["fpts_per_game"].median(), 1.0)
+        mult = 1.0 + levels / scale
+        weights = np.append(by_age["count"].values, by_age["count"].values[-1])
 
         try:
             popt, _ = curve_fit(
                 _quadratic_curve,
-                ages,
-                fpts,
+                ages.astype(float),
+                mult,
                 p0=[PEAK_AGES[pos], AGE_DECAY_RATES[pos]],
-                bounds=([20, 0.001], [35, 0.1]),
+                sigma=1.0 / np.sqrt(weights),
+                bounds=([21, 0.001], [34, 0.1]),
                 maxfev=5000,
             )
             peak_fit, decay_fit = popt
             fitted[pos] = {"peak_age": float(peak_fit), "decay_rate": float(decay_fit)}
-            print(f"  {pos}: fitted peak={peak_fit:.1f}, decay={decay_fit:.4f} "
-                  f"(prior: peak={PEAK_AGES[pos]}, decay={AGE_DECAY_RATES[pos]})")
+            print(f"  {pos}: delta-method peak={peak_fit:.1f}, decay={decay_fit:.4f} "
+                  f"(prior: peak={PEAK_AGES[pos]}, decay={AGE_DECAY_RATES[pos]}, "
+                  f"n={len(deltas)} transitions)")
         except RuntimeError as e:
             warnings.warn(f"Curve fitting failed for {pos}: {e}. Using hardcoded priors.")
-            fitted[pos] = {"peak_age": PEAK_AGES[pos], "decay_rate": AGE_DECAY_RATES[pos]}
+            fitted[pos] = prior
 
     return fitted
 

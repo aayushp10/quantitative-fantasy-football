@@ -10,12 +10,17 @@ feature sets, regularization needs, and sample sizes.
 
 Key implementation decisions:
 - Pipeline: SimpleImputer → StandardScaler → Ridge (order matters)
-  StandardScaler is mandatory — factors have vastly different scales.
-  SimpleImputer fills NaN feature values with per-position medians.
-- TimeSeriesSplit(n_splits=4, gap=1) prevents data leakage.
-- Exponential sample weights: 0.7^(max_season - season) prioritizes recent seasons.
+  SimpleImputer fills NaN feature values with per-position medians (≈0 after
+  per-season z-scoring, i.e. "average player" — the right imputation).
+- Factors are z-scored WITHIN each season cross-section (SeasonStandardizer)
+  before fitting — removes era drift and makes 2012 comparable to 2024.
+- CV: walk-forward by whole seasons (season_walk_forward_folds). Never splits
+  within a season — that leaked shared season effects into validation.
+- Exponential sample weights: RECENCY_DECAY^(max_season - season).
 - Ridge alpha grid-searched over [0.1, 1.0, 10.0, 100.0, 1000.0].
 - Age curve applied as multiplicative post-adjustment, not as a feature.
+- Prediction intervals: residual-quantile based when an uncertainty model is
+  attached via set_uncertainty(); otherwise a labeled rough heuristic.
 """
 from __future__ import annotations
 
@@ -27,21 +32,23 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import spearmanr
 
 from config import (
-    CV_GAP,
-    CV_N_SPLITS,
+    MIN_TRAIN_SEASONS_CV,
     POSITION_FEATURES,
     POSITIONS,
     PROJECTION_CAPS,
     RECENCY_DECAY,
     RIDGE_ALPHA_GRID,
+    STANDARDIZE_BY_SEASON,
 )
+from features.standardize import SeasonStandardizer
 from models.age_curves import apply_age_adjustments, fit_age_curves
+from models.validation import season_walk_forward_folds
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +84,15 @@ class FantasyProjectionModel:
     >>> backtest_stats = model.backtest(yoy_pairs, test_season=2024)
     """
 
-    def __init__(self, age_adjust: bool = True):
+    def __init__(self, age_adjust: bool = True, standardize: bool = STANDARDIZE_BY_SEASON):
         self.age_adjust = age_adjust
-        self._models: dict[str, Any] = {}    # position → fitted GridSearchCV
+        self.standardize = standardize
+        self._models: dict[str, Any] = {}    # position → fitted pipeline
         self._best_alphas: dict[str, float] = {}
+        self._feature_names: dict[str, list[str]] = {}   # position → exact training columns
+        self._standardizers: dict[str, SeasonStandardizer] = {}
         self._fitted_age_params: dict | None = None
+        self._uncertainty = None             # optional models.uncertainty.ResidualQuantiles
 
     # ------------------------------------------------------------------
     # Training
@@ -94,7 +105,7 @@ class FantasyProjectionModel:
         fit_age: bool = True,
     ) -> "FantasyProjectionModel":
         """
-        Fit position-specific Ridge models using TimeSeriesSplit CV.
+        Fit position-specific Ridge models using season-grouped walk-forward CV.
 
         Parameters
         ----------
@@ -112,34 +123,48 @@ class FantasyProjectionModel:
             raise ValueError(f"Target column '{target}' not found in yoy_df.")
 
         if fit_age and self.age_adjust:
-            print("Fitting age curves...")
+            print("Fitting age curves (delta method)...")
             try:
-                self._fitted_age_params = fit_age_curves(
-                    yoy_df.rename(columns={target: "fpts_per_game"})
-                )
+                # YoY pairs passed as-is: fit_age_curves uses each row's
+                # (fpts_per_game, next_fpts) as one within-player transition
+                self._fitted_age_params = fit_age_curves(yoy_df)
             except Exception as e:
                 warnings.warn(f"Age curve fitting failed: {e}. Using hardcoded priors.")
                 self._fitted_age_params = None
 
-        cv = TimeSeriesSplit(n_splits=CV_N_SPLITS, gap=CV_GAP)
         max_season = int(yoy_df["season"].max())
 
         for pos in POSITIONS:
             pos_df = yoy_df[yoy_df["position"] == pos].copy()
-            features = [f for f in POSITION_FEATURES[pos] if f in pos_df.columns]
+            if len(pos_df) < 10:
+                warnings.warn(f"{pos}: only {len(pos_df)} training rows. Skipping.")
+                continue
 
+            features = [f for f in POSITION_FEATURES[pos] if f in pos_df.columns]
             if len(features) == 0:
                 warnings.warn(f"No features available for {pos}. Skipping.")
                 continue
 
-            pos_df = pos_df.sort_values("season")
-            X = pos_df[features].values
-            y = pos_df[target].values
-            weights = _compute_sample_weights(pos_df["season"], max_season)
+            pos_df = pos_df.sort_values("season").reset_index(drop=True)
 
-            n_splits = min(CV_N_SPLITS, len(pos_df) // 2)
-            if n_splits < 2:
-                warnings.warn(f"{pos}: too few samples ({len(pos_df)}) for CV. Fitting without CV.")
+            if self.standardize:
+                std = SeasonStandardizer().fit(pos_df, features)
+                self._standardizers[pos] = std
+                pos_df_t = std.transform(pos_df)
+            else:
+                pos_df_t = pos_df
+
+            X = pos_df_t[features].values
+            y = pos_df_t[target].values
+            weights = _compute_sample_weights(pos_df["season"], max_season)
+            self._feature_names[pos] = features
+
+            # Walk-forward folds grouped by whole seasons (no within-season splits)
+            folds = season_walk_forward_folds(
+                pos_df["season"].values, min_train_seasons=MIN_TRAIN_SEASONS_CV
+            )
+            if len(folds) < 2:
+                warnings.warn(f"{pos}: not enough seasons for walk-forward CV. Fitting without CV.")
                 pipe = _build_pipeline()
                 pipe.fit(X, y, ridge__sample_weight=weights)
                 self._models[pos] = pipe
@@ -147,12 +172,11 @@ class FantasyProjectionModel:
                 print(f"  {pos}: no CV (n={len(pos_df)}), features={len(features)}")
                 continue
 
-            cv_local = TimeSeriesSplit(n_splits=n_splits, gap=CV_GAP)
             param_grid = {"ridge__alpha": RIDGE_ALPHA_GRID}
             gs = GridSearchCV(
                 _build_pipeline(),
                 param_grid,
-                cv=cv_local,
+                cv=folds,
                 scoring="neg_mean_absolute_error",
                 refit=True,
             )
@@ -171,8 +195,45 @@ class FantasyProjectionModel:
             # Cross-validation score
             cv_mae = -gs.best_score_
             print(f"  {pos}: n={len(pos_df)}, features={len(features)}, "
-                  f"alpha={best_alpha}, CV MAE={cv_mae:.2f}")
+                  f"folds={len(folds)}, alpha={best_alpha}, CV MAE={cv_mae:.2f}")
 
+        return self
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict_position(self, position: str, pos_df: pd.DataFrame) -> np.ndarray | None:
+        """
+        Predict fpts_per_game for a single position's frame.
+
+        This is the ONE prediction path used by project(), backtests, and the
+        hybrid blend — it applies the stored per-season standardizer and aligns
+        columns to the exact training feature list (missing columns become NaN
+        and are median-imputed by the fitted pipeline, i.e. "average player").
+        """
+        if position not in self._models:
+            return None
+
+        features = self._feature_names.get(position)
+        if not features:
+            features = [f for f in POSITION_FEATURES[position] if f in pos_df.columns]
+
+        df = pos_df.copy()
+        std = self._standardizers.get(position)
+        if std is not None:
+            df = std.transform(df)
+
+        for f in features:
+            if f not in df.columns:
+                df[f] = np.nan
+
+        X = df[features].values
+        return self._models[position].predict(X)
+
+    def set_uncertainty(self, residual_quantiles) -> "FantasyProjectionModel":
+        """Attach a fitted models.uncertainty.ResidualQuantiles for real intervals."""
+        self._uncertainty = residual_quantiles
         return self
 
     # ------------------------------------------------------------------
@@ -219,22 +280,24 @@ class FantasyProjectionModel:
             if pos_df.empty:
                 continue
 
-            features = [f for f in POSITION_FEATURES[pos] if f in pos_df.columns]
-            if not features:
+            predictions = self.predict_position(pos, pos_df)
+            if predictions is None:
                 continue
-
-            X = pos_df[features].values
-            predictions = self._models[pos].predict(X)
 
             # Apply projection caps
             cap = PROJECTION_CAPS.get(pos, 400.0) / projected_games  # per-game cap
             predictions = np.clip(predictions, 0, cap)
 
-            # Rough 80% confidence interval from residual std
-            # (simple heuristic — not a proper prediction interval)
-            resid_std = predictions.std() * 0.4
-            ci_low = np.maximum(0, predictions - 1.28 * resid_std)
-            ci_high = predictions + 1.28 * resid_std
+            if self._uncertainty is not None:
+                # Calibrated 80% interval from walk-forward residual quantiles
+                ci_low = np.maximum(0, self._uncertainty.interval(pos, predictions, 0.10))
+                ci_high = self._uncertainty.interval(pos, predictions, 0.90)
+            else:
+                # Rough 80% interval from prediction spread
+                # (heuristic fallback — attach set_uncertainty() for real intervals)
+                resid_std = predictions.std() * 0.4
+                ci_low = np.maximum(0, predictions - 1.28 * resid_std)
+                ci_high = predictions + 1.28 * resid_std
 
             pos_df = pos_df.reset_index(drop=True)
             for i in range(len(pos_df)):
@@ -321,13 +384,10 @@ class FantasyProjectionModel:
             if pos_test.empty or pos not in bt_model._models:
                 continue
 
-            features = [f for f in POSITION_FEATURES[pos] if f in pos_test.columns]
-            if not features:
-                continue
-
-            X = pos_test[features].values
             y_actual = pos_test[target].values
-            y_pred = bt_model._models[pos].predict(X)
+            y_pred = bt_model.predict_position(pos, pos_test)
+            if y_pred is None:
+                continue
 
             valid = ~np.isnan(y_actual) & ~np.isnan(y_pred)
             if valid.sum() < 3:
@@ -393,12 +453,11 @@ class FantasyProjectionModel:
             pipe = model
 
         ridge: Ridge = pipe.named_steps["ridge"]
-        features = [f for f in POSITION_FEATURES[position]
-                    if f in (self._models.get("_feature_names", {}).get(position, POSITION_FEATURES[position]))]
-
-        # Use POSITION_FEATURES as ground truth for column names
-        feature_names = [f for f in POSITION_FEATURES[position]]
         coefs = ridge.coef_
+
+        # Exact training column order recorded at fit time — no misalignment
+        # when a config feature was absent from the training frame.
+        feature_names = self._feature_names.get(position, list(POSITION_FEATURES[position]))
 
         n = min(len(feature_names), len(coefs))
         df = pd.DataFrame({
@@ -406,4 +465,13 @@ class FantasyProjectionModel:
             "coefficient": coefs[:n],
         })
         df["abs_coefficient"] = df["coefficient"].abs()
-        return df.sort_values("abs_coefficient", ascending=False).reset_index(drop=True)
+        df = df.sort_values("abs_coefficient", ascending=False).reset_index(drop=True)
+
+        # The intercept is the positional baseline (≈ weighted mean fpts/game
+        # since features are standardized) — listed so it's visibly present.
+        intercept_row = pd.DataFrame({
+            "feature": ["(intercept)"],
+            "coefficient": [float(ridge.intercept_)],
+            "abs_coefficient": [np.nan],
+        })
+        return pd.concat([intercept_row, df], ignore_index=True)

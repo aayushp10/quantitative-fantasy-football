@@ -65,6 +65,36 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
+# nfl_data_py was archived Sep 2025; its hardcoded asset URLs 404 for the 2025+
+# seasons even though nflverse kept publishing (partly under new release/file
+# names, e.g. weekly stats moved to stats_player_week_{year}). When the wrapper
+# fails for a season, fall back to reading the release parquet directly.
+_NFLVERSE_RELEASE_URLS: dict[str, str] = {
+    "pbp":     "https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{year}.parquet",
+    "weekly":  "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{year}.parquet",
+    "rosters": "https://github.com/nflverse/nflverse-data/releases/download/rosters/roster_{year}.parquet",
+    "snaps":   "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/snap_counts_{year}.parquet",
+}
+
+
+def _download_season(name: str, season: int, primary) -> pd.DataFrame:
+    """Download one season via nfl_data_py, falling back to nflverse releases."""
+    try:
+        return primary(season)
+    except Exception as e:
+        url = _NFLVERSE_RELEASE_URLS.get(name)
+        if url is None:
+            raise
+        warnings.warn(
+            f"nfl_data_py failed for {name} {season} ({e}); "
+            "reading nflverse release parquet directly."
+        )
+        df = pd.read_parquet(url.format(year=season))
+        if "season" not in df.columns:
+            df["season"] = season
+        return df
+
+
 # ---------------------------------------------------------------------------
 # Public loaders
 # ---------------------------------------------------------------------------
@@ -79,9 +109,11 @@ def load_pbp(seasons: list[int]) -> pd.DataFrame:
     """
     frames, missing = _load_cached("pbp", seasons)
 
-    if missing:
-        print(f"Downloading PBP for seasons: {missing}")
-        df = nfl.import_pbp_data(missing, downcast=False)
+    # Download season-by-season: halves peak memory vs one 13-season call and
+    # makes the first multi-GB run resumable (each season caches as it lands).
+    for s in missing:
+        print(f"Downloading PBP for season {s}...")
+        df = _download_season("pbp", s, lambda x: nfl.import_pbp_data([x], downcast=False))
         df = _clean(df)
         _save_by_season(df, "pbp")
         frames.append(df)
@@ -100,9 +132,9 @@ def load_weekly(seasons: list[int]) -> pd.DataFrame:
     """
     frames, missing = _load_cached("weekly", seasons)
 
-    if missing:
-        print(f"Downloading weekly stats for seasons: {missing}")
-        df = nfl.import_weekly_data(missing)
+    for s in missing:
+        print(f"Downloading weekly stats for season {s}...")
+        df = _download_season("weekly", s, lambda x: nfl.import_weekly_data([x]))
         df = _clean(df)
         _save_by_season(df, "weekly")
         frames.append(df)
@@ -140,9 +172,9 @@ def load_rosters(seasons: list[int]) -> pd.DataFrame:
     """
     frames, missing = _load_cached("rosters", seasons)
 
-    if missing:
-        print(f"Downloading rosters for seasons: {missing}")
-        df = nfl.import_seasonal_rosters(missing)
+    for s in missing:
+        print(f"Downloading rosters for season {s}...")
+        df = _download_season("rosters", s, lambda x: nfl.import_seasonal_rosters([x]))
         df = _clean(df)
         _save_by_season(df, "rosters")
         frames.append(df)
@@ -166,18 +198,17 @@ def load_snap_counts(seasons: list[int]) -> pd.DataFrame:
     """
     frames, missing = _load_cached("snaps", seasons)
 
-    if missing:
-        print(f"Downloading snap counts for seasons: {missing}")
-        df = nfl.import_snap_counts(missing)
+    for s in missing:
+        print(f"Downloading snap counts for season {s}...")
+        df = _download_season("snaps", s, lambda x: nfl.import_snap_counts([x]))
         df = _clean(df)
 
-        # Bridge pfr_player_id → gsis_id via roster data
+        # Bridge pfr_player_id → gsis_id via roster data (load_rosters has
+        # its own nflverse fallback, so this works for post-archive seasons)
         pfr_col = next((c for c in ["pfr_player_id", "pfr_id"] if c in df.columns), None)
         if pfr_col:
             try:
-                rosters = nfl.import_seasonal_rosters(missing)
-                rosters = _clean(rosters)
-                # Roster has player_id (gsis_id) and pfr_id
+                rosters = load_rosters([s])
                 roster_pfr_col = next(
                     (c for c in ["pfr_id", "pfr_player_id"] if c in rosters.columns), None
                 )
@@ -274,6 +305,60 @@ def load_schedules(seasons: list[int]) -> pd.DataFrame:
         frames.append(df)
 
     return _clean(pd.concat(frames, ignore_index=True))
+
+
+def load_draft_picks() -> pd.DataFrame:
+    """
+    Load the full draft-pick history (all years; used by the rookie model).
+
+    Columns of interest: season (draft year), round, pick, team, gsis_id,
+    pfr_player_name, position, age.
+    """
+    path = CACHE_DIR / "draft_picks_all.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+
+    print("Downloading draft picks (all years)...")
+    df = nfl.import_draft_picks()
+    df = _clean(df)
+    df.to_parquet(path, index=False)
+    return df
+
+
+# nflverse-data participation releases (offense personnel on every play).
+# nfl_data_py has no wrapper for these; read the release parquet directly.
+# Coverage: ~2016-2023 (the NFL pulled the feed for 2024; FTN partially
+# restores it). Missing seasons return without rows — callers must tolerate.
+_PARTICIPATION_URL = (
+    "https://github.com/nflverse/nflverse-data/releases/download/"
+    "pbp_participation/pbp_participation_{year}.parquet"
+)
+
+
+def load_participation(seasons: list[int]) -> pd.DataFrame | None:
+    """
+    Load play-level participation data (offense players on the field) for the
+    given seasons. Seasons without a published release are skipped with a
+    warning. Returns None if nothing could be loaded.
+    """
+    frames, missing = _load_cached("participation", seasons)
+
+    for season in missing:
+        url = _PARTICIPATION_URL.format(year=season)
+        try:
+            print(f"Downloading participation data for {season}...")
+            df = pd.read_parquet(url)
+            if "season" not in df.columns:
+                df["season"] = season
+            df.to_parquet(_cache_path("participation", season), index=False)
+            frames.append(df)
+        except Exception as e:
+            warnings.warn(f"Participation data unavailable for {season}: {e}")
+
+    if not frames:
+        return None
+
+    return pd.concat(frames, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------

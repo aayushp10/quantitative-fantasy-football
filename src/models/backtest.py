@@ -190,50 +190,14 @@ def _predict_for_backtest(
     """
     Extract position predictions from a trained model.
 
-    Uses the model's internal predict path without calling project()
-    to avoid needing a full season snapshot.
+    All three model classes expose predict_position() — the single prediction
+    path that applies per-season standardization and exact feature alignment.
     """
-    from config import POSITION_FEATURES, POSITIONS
-
-    # FantasyProjectionModel path
-    if hasattr(model, "_models") and pos in getattr(model, "_models", {}):
-        features = [f for f in POSITION_FEATURES.get(pos, []) if f in pos_test.columns]
-        if not features:
-            return None
+    if hasattr(model, "predict_position"):
         try:
-            return model._models[pos].predict(pos_test[features].values)
+            return model.predict_position(pos, pos_test)
         except Exception:
             return None
-
-    # TwoStageProjectionModel path
-    if hasattr(model, "_volume_models") and hasattr(model, "_regressed_efficiency"):
-        try:
-            n = len(pos_test)
-            vol_preds = model._predict_volume(pos, pos_test)
-            eff_preds = model._regressed_efficiency(pos, pos_test)
-            if not vol_preds and not eff_preds:
-                return None
-            catch_rate = model._get_catch_rate(pos, pos_test)
-            return model._combine_to_fpts(pos, vol_preds, eff_preds, catch_rate, n)
-        except Exception:
-            return None
-
-    # HybridProjectionModel path — delegate to internal models
-    if hasattr(model, "_single") and hasattr(model, "_two_stage"):
-        try:
-            single_pred = _predict_for_backtest(model._single, type(model._single), pos_test, pos, target)
-            two_pred = _predict_for_backtest(model._two_stage, type(model._two_stage), pos_test, pos, target)
-            if single_pred is None and two_pred is None:
-                return None
-            if single_pred is None:
-                return two_pred
-            if two_pred is None:
-                return single_pred
-            w = model.blend_weight
-            return w * single_pred + (1 - w) * two_pred
-        except Exception:
-            return None
-
     return None
 
 

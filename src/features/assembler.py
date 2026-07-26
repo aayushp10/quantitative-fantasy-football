@@ -32,6 +32,7 @@ from config import (
     PPR_SCORING,
 )
 from data.loader import (
+    load_participation,
     load_pbp,
     load_rosters,
     load_seasonal,
@@ -39,12 +40,16 @@ from data.loader import (
     load_weekly,
 )
 from data.cleaning import clean_pbp, clean_rosters, clean_weekly
+from features.career import add_career_features
 from features.consistency import build_consistency_features
+from features.schedule_context import add_schedule_context_features
 from features.context import build_context_factors, get_team_context
 from features.efficiency import build_efficiency_factors
+from features.expected_td import build_expected_td_features
 from features.opportunity import build_opportunity_factors
 from features.pedigree import build_pedigree_features
 from features.qb_coupling import build_qb_coupling_features
+from features.routes import build_route_features
 from features.situation import build_situation_features
 from features.trend import detect_trends
 from features.vacated import assign_vacated_shares_to_players, compute_vacated_shares
@@ -95,6 +100,12 @@ def _get_player_meta(rosters: pd.DataFrame) -> pd.DataFrame:
 
     cols = keep_cols + [c for c in optional if c in rosters.columns]
     meta = rosters[cols].drop_duplicates(subset=["player_id", "season"]).copy()
+
+    # Old-era rosters (~2012-2015) deliver draft columns as strings; mixed
+    # str/float object columns break parquet caching and downstream math.
+    for col in ["draft_number", "draft_round", "years_exp", "entry_year", "age"]:
+        if col in meta.columns:
+            meta[col] = pd.to_numeric(meta[col], errors="coerce")
 
     # Normalize name column
     if "player_name" not in meta.columns and "full_name" in meta.columns:
@@ -254,7 +265,11 @@ def assemble_feature_matrix(
 
     if not force_recompute and cache_path.exists():
         print(f"Loading feature matrix from cache: {cache_path.name}")
-        return pd.read_parquet(cache_path)
+        # Career-to-date and schedule-context features are derived on every
+        # load (matrix-internal / cache-through schedules) — no version bump.
+        return add_schedule_context_features(
+            add_career_features(pd.read_parquet(cache_path))
+        )
 
     print(f"Assembling feature matrix for seasons: {seasons}")
 
@@ -281,6 +296,13 @@ def assemble_feature_matrix(
     print("  Computing efficiency factors...")
     eff = build_efficiency_factors(pbp)
 
+    print("  Computing expected-TD (usage geometry) factors...")
+    try:
+        xtd = build_expected_td_features(pbp)
+    except Exception as e:
+        print(f"    Expected-TD features failed: {e}")
+        xtd = pd.DataFrame()
+
     print("  Computing context factors...")
     ctx = build_context_factors(pbp, weekly, snap_df, schedules)
 
@@ -301,7 +323,7 @@ def assemble_feature_matrix(
     join_keys_full = ["player_id", "team", "season"]
     join_keys_player = ["player_id", "season"]
 
-    factor_frames = [f for f in [opp, eff, ctx] if not f.empty]
+    factor_frames = [f for f in [opp, eff, xtd, ctx] if not f.empty]
     if factor_frames:
         merged = reduce(
             lambda a, b: a.merge(b, on=join_keys_full, how="outer"),
@@ -315,6 +337,48 @@ def assemble_feature_matrix(
         trend_keys = [k for k in join_keys_full if k in trend.columns]
         merged = merged.merge(trend, on=trend_keys, how="left")
         merged = _coalesce_suffixed_columns(merged)
+
+    # --- Routes / TPRR (participation data; snap-based fallback below) ---
+    print("  Computing route participation features...")
+    try:
+        participation = load_participation(seasons)
+        route_feats = build_route_features(pbp, participation)
+        if not route_feats.empty:
+            merged = merged.merge(route_feats, on=join_keys_full, how="left")
+            merged = _coalesce_suffixed_columns(merged)
+    except Exception as e:
+        print(f"    Route features failed: {e}")
+
+    # TPRR: targets per route run. Primary = participation routes; fallback for
+    # uncovered seasons (2024+) = snap% × team dropbacks proxy. Computed BEFORE
+    # the situation-block team-context swap so it uses current-season context.
+    if "targets" in merged.columns:
+        if "route_participation" not in merged.columns:
+            merged["route_participation"] = np.nan
+        if "routes" not in merged.columns:
+            merged["routes"] = np.nan
+
+        merged["tprr"] = np.where(
+            merged["routes"].fillna(0) > 0,
+            merged["targets"] / merged["routes"],
+            np.nan,
+        )
+
+        fallback_ok = (
+            merged["tprr"].isna()
+            & merged.get("snap_percentage", pd.Series(np.nan, index=merged.index)).notna()
+            & merged.get("team_pace", pd.Series(np.nan, index=merged.index)).notna()
+            & merged.get("team_pass_rate", pd.Series(np.nan, index=merged.index)).notna()
+            & merged.get("games_played", pd.Series(np.nan, index=merged.index)).notna()
+        )
+        if fallback_ok.any():
+            fb = merged.loc[fallback_ok]
+            routes_pg_proxy = (
+                fb["snap_percentage"] * fb["team_pace"] * fb["team_pass_rate"]
+            ).replace(0, np.nan)
+            targets_pg = fb["targets"] / fb["games_played"].clip(lower=1)
+            merged.loc[fallback_ok, "tprr"] = (targets_pg / routes_pg_proxy).clip(0, 1)
+            merged.loc[fallback_ok, "route_participation"] = fb["snap_percentage"]
 
     # --- QB coupling features (team-level; must precede top-down) ---
     print("  Computing QB coupling features...")
@@ -475,4 +539,4 @@ def assemble_feature_matrix(
     print(f"  Feature matrix: {len(result)} rows, {len(result.columns)} columns")
     print(f"  Saving to cache: {cache_path.name}")
     result.to_parquet(cache_path, index=False)
-    return result
+    return add_schedule_context_features(add_career_features(result))

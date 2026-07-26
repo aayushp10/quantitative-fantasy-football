@@ -53,6 +53,31 @@ class HybridProjectionModel:
         self.age_adjust = age_adjust
         self._single = FantasyProjectionModel(age_adjust=age_adjust)
         self._two_stage = TwoStageProjectionModel(age_adjust=age_adjust)
+        self._uncertainty = None             # optional models.uncertainty.ResidualQuantiles
+
+    def predict_position(self, pos: str, pos_df: pd.DataFrame) -> np.ndarray | None:
+        """Blended per-position prediction (single prediction path for backtests)."""
+        try:
+            single_pred = self._single.predict_position(pos, pos_df)
+        except Exception:
+            single_pred = None
+        try:
+            two_pred = self._two_stage.predict_position(pos, pos_df)
+        except Exception:
+            two_pred = None
+
+        if single_pred is None and two_pred is None:
+            return None
+        if single_pred is None:
+            return two_pred
+        if two_pred is None:
+            return single_pred
+        return self.blend_weight * single_pred + (1 - self.blend_weight) * two_pred
+
+    def set_uncertainty(self, residual_quantiles) -> "HybridProjectionModel":
+        """Attach a fitted models.uncertainty.ResidualQuantiles for real intervals."""
+        self._uncertainty = residual_quantiles
+        return self
 
     # ------------------------------------------------------------------
     # Training
@@ -136,6 +161,21 @@ class HybridProjectionModel:
         merged["projected_fpts_season"] = merged["projected_fpts_pg"] * projected_games
         merged = merged.drop(columns=["two_stage_fpts_pg", "blended_fpts_pg"], errors="ignore")
 
+        # Recompute intervals around the BLENDED prediction when calibrated
+        # residual quantiles are attached (sub-model CIs describe sub-models)
+        if self._uncertainty is not None and "position" in merged.columns:
+            for pos in POSITIONS:
+                mask = merged["position"] == pos
+                if not mask.any():
+                    continue
+                preds = merged.loc[mask, "projected_fpts_pg"].values
+                merged.loc[mask, "confidence_interval_low"] = np.maximum(
+                    0, self._uncertainty.interval(pos, preds, 0.10)
+                )
+                merged.loc[mask, "confidence_interval_high"] = self._uncertainty.interval(
+                    pos, preds, 0.90
+                )
+
         return merged.sort_values("projected_fpts_season", ascending=False).reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -176,7 +216,6 @@ class HybridProjectionModel:
         }
 
         # Compute hybrid blend manually
-        from config import POSITION_FEATURES
         hybrid_result: dict[str, Any] = {}
         all_pred, all_actual = [], []
 
@@ -190,26 +229,14 @@ class HybridProjectionModel:
             if y_actual is None:
                 continue
 
-            # Single-stage predictions
-            features = [f for f in POSITION_FEATURES.get(pos, []) if f in pos_test.columns]
-            single_pred = None
-            if features and pos in bt_single._models:
-                try:
-                    single_pred = bt_single._models[pos].predict(pos_test[features].values)
-                except Exception:
-                    pass
-
-            # Two-stage predictions
-            two_pred = None
             try:
-                n = len(pos_test)
-                vol_p = bt_two._predict_volume(pos, pos_test)
-                eff_p = bt_two._regressed_efficiency(pos, pos_test)
-                if vol_p or eff_p:
-                    cr = bt_two._get_catch_rate(pos, pos_test)
-                    two_pred = bt_two._combine_to_fpts(pos, vol_p, eff_p, cr, n)
+                single_pred = bt_single.predict_position(pos, pos_test)
             except Exception:
-                pass
+                single_pred = None
+            try:
+                two_pred = bt_two.predict_position(pos, pos_test)
+            except Exception:
+                two_pred = None
 
             if single_pred is None and two_pred is None:
                 continue
@@ -289,8 +316,6 @@ class HybridProjectionModel:
         if grid is None:
             grid = [round(w * 0.1, 1) for w in range(11)]  # 0.0, 0.1, ..., 1.0
 
-        from config import POSITION_FEATURES
-
         # Pre-compute single-stage and two-stage predictions for each test season
         # to avoid re-training for each blend weight
         season_preds: dict[int, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
@@ -320,24 +345,14 @@ class HybridProjectionModel:
 
                 y_actual = pos_test[target].values
 
-                features = [f for f in POSITION_FEATURES.get(pos, []) if f in pos_test.columns]
-                single_pred = None
-                if features and pos in bt_single._models:
-                    try:
-                        single_pred = bt_single._models[pos].predict(pos_test[features].values)
-                    except Exception:
-                        pass
-
-                two_pred = None
                 try:
-                    n = len(pos_test)
-                    vp = bt_two._predict_volume(pos, pos_test)
-                    ep = bt_two._regressed_efficiency(pos, pos_test)
-                    if vp or ep:
-                        cr = bt_two._get_catch_rate(pos, pos_test)
-                        two_pred = bt_two._combine_to_fpts(pos, vp, ep, cr, n)
+                    single_pred = bt_single.predict_position(pos, pos_test)
                 except Exception:
-                    pass
+                    single_pred = None
+                try:
+                    two_pred = bt_two.predict_position(pos, pos_test)
+                except Exception:
+                    two_pred = None
 
                 if single_pred is not None or two_pred is not None:
                     pos_preds[pos] = (single_pred, two_pred, y_actual)

@@ -64,11 +64,13 @@ def build_pedigree_features(rosters_df: pd.DataFrame) -> pd.DataFrame:
 
     df = rosters_df[list(required | (required & set(rosters_df.columns)))].copy()
 
-    # Keep only the columns we need (gracefully tolerate missing ones)
+    # Keep only the columns we need (gracefully tolerate missing ones).
+    # Old-era rosters (~2012-2015) deliver draft/experience columns as
+    # STRINGS — coerce to numeric or every comparison below type-errors.
     keep_cols = ["player_id", "season"]
     for col in ["draft_number", "draft_round", "years_exp", "entry_year"]:
         if col in rosters_df.columns:
-            df[col] = rosters_df[col].values
+            df[col] = pd.to_numeric(rosters_df[col].values, errors="coerce")
 
     df = df.drop_duplicates(subset=["player_id", "season"]).copy()
 

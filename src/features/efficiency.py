@@ -165,15 +165,19 @@ def _rb_efficiency(pbp: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"posteam": "team"})
     )
 
-    # RB receiving efficiency (as a pass-catcher)
+    # RB receiving efficiency (as a pass-catcher). With no pass plays in the
+    # PBP slice the receiver frame is empty/columnless — skip the merge.
     recv = _receiver_efficiency(pbp)
     recv_rb = recv.rename(columns={
         "epa_per_target": "receiving_efficiency",
         "catch_rate": "rb_catch_rate",
         "yac_per_rec": "rb_yac_per_rec",
-    })[["player_id", "team", "season", "receiving_efficiency", "rb_catch_rate", "rb_yac_per_rec", "targets"]]
-
-    result = result.merge(recv_rb, on=["player_id", "team", "season"], how="left")
+    })
+    keep = ["player_id", "team", "season", "receiving_efficiency",
+            "rb_catch_rate", "rb_yac_per_rec", "targets"]
+    avail = [c for c in keep if c in recv_rb.columns]
+    if len(avail) > 3:  # more than just the join keys
+        result = result.merge(recv_rb[avail], on=["player_id", "team", "season"], how="left")
     return result
 
 
