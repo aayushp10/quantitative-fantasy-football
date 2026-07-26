@@ -9,7 +9,9 @@ import { edgeClass, fmtAdp, fmtDec, fmtPts, fmtSigned, fmtVorp } from "../lib/fo
 
 const POSITIONS = ["ALL", "QB", "RB", "WR", "TE"];
 
-type SortKey = "overall_rank" | "vorp" | "season_p50" | "adp" | "adp_edge" | "age";
+type SortKey =
+  | "overall_rank" | "vorp" | "season_p50" | "adp" | "adp_edge" | "age"
+  | "fair_adp" | "fair_adp_edge";
 
 const COLS: { key: SortKey | null; label: string; num?: boolean }[] = [
   { key: "overall_rank", label: "rk", num: true },
@@ -22,6 +24,8 @@ const COLS: { key: SortKey | null; label: string; num?: boolean }[] = [
   { key: null, label: "p10–p90" },
   { key: "adp", label: "adp", num: true },
   { key: "adp_edge", label: "edge", num: true },
+  { key: "fair_adp", label: "fair adp", num: true },
+  { key: "fair_adp_edge", label: "α edge", num: true },
 ];
 
 export default function Rankings() {
@@ -69,7 +73,11 @@ export default function Rankings() {
           setSort((s) =>
             s.key === c.key
               ? { key: c.key!, asc: !s.asc }
-              : { key: c.key!, asc: c.key === "overall_rank" || c.key === "adp" || c.key === "age" },
+              : {
+                  key: c.key!,
+                  asc: c.key === "overall_rank" || c.key === "adp"
+                    || c.key === "age" || c.key === "fair_adp",
+                },
           )
         }
       >
@@ -152,6 +160,31 @@ export default function Rankings() {
                       title="positive: market lets you wait; negative: must reach"
                     >
                       {fmtSigned(p.adp_edge)}
+                    </td>
+                    <td
+                      className="num text-ink-soft"
+                      title={
+                        p.alpha_source === "model"
+                          ? `alpha model's fair slot · conviction z ${p.alpha_z ?? "–"} · λ ${p.alpha_lam ?? "–"}`
+                          : p.alpha_source === "market_only"
+                            ? "no alpha inputs — carried at fair = market"
+                            : undefined
+                      }
+                    >
+                      {fmtAdp(p.fair_adp)}
+                      {p.alpha_source === "model" &&
+                        p.alpha_z != null &&
+                        Math.abs(p.alpha_z) >= 1 && (
+                          <span className="ml-0.5 text-accent" aria-label="high-conviction alpha">
+                            ●
+                          </span>
+                        )}
+                    </td>
+                    <td
+                      className={`num ${p.alpha_source === "model" ? edgeClass(p.fair_adp_edge) : "text-ink-mute"}`}
+                      title="adp − fair adp from the alpha (market-residual) model; positive = market drafts him later than his fair slot"
+                    >
+                      {p.alpha_source === "model" ? fmtSigned(p.fair_adp_edge) : "–"}
                     </td>
                   </tr>
                 </FragmentRow>
