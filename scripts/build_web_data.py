@@ -122,10 +122,17 @@ def write_json(path: Path, payload) -> None:
 # ---------------------------------------------------------------------------
 
 def build_board(season: int):
-    """Run the full projection pipeline; returns (board, features_now, extras)."""
+    """Run the full v5 projection pipeline; returns (board, features_now, extras).
+
+    The SERVED projection is the market ensemble (career-augmented hybrid
+    blended toward an isotonic ADP prior). The PURE hybrid's projection is
+    kept alongside (`pure_fpts_season`) because model-vs-market products
+    (predicted_adp / adp_edge) are only meaningful against the model's
+    market-independent opinion.
+    """
     from features.assembler import assemble_feature_matrix, build_yoy_pairs
     from models.two_stage import ALL_RATE_TARGET_COLS
-    from models.hybrid import HybridProjectionModel
+    from models.market_ensemble import MarketEnsembleModel
     from models.uncertainty import (
         ResidualQuantiles,
         simulate_season_totals,
@@ -133,6 +140,7 @@ def build_board(season: int):
     )
     from models.availability import AvailabilityModel
     from models.rookie import RookieModel, merge_rookie_projections
+    from data.adp import load_adp
     from data.loader import load_draft_picks, load_weekly
 
     fm = assemble_feature_matrix(TRAINING_SEASONS)
@@ -157,16 +165,25 @@ def build_board(season: int):
     )
     print(f"features_now ({input_season}): {len(features_now)} unique players")
 
-    model = HybridProjectionModel()
+    adp_all = load_adp(list(range(2015, season + 1)))
+
+    model = MarketEnsembleModel(adp_history=adp_all)
     model.train(pairs)
 
+    # Intervals calibrated on the residuals of the model actually served
     resids = walk_forward_residuals(
-        lambda: HybridProjectionModel(age_adjust=False), pairs, min_train_seasons=4
+        lambda: MarketEnsembleModel(adp_history=adp_all, age_adjust=False),
+        pairs, min_train_seasons=4,
     )
     rq = ResidualQuantiles().fit(resids)
     model.set_uncertainty(rq)
 
     proj = model.project(features_now, season=season)
+
+    # Pure (pre-market) hybrid projection for adp_edge semantics
+    pure = model._base.project(features_now, season=season)
+    pure_pg = pure.set_index("player_id")["projected_fpts_pg"]
+    proj["pure_fpts_pg"] = proj["player_id"].map(pure_pg)
 
     avail = AvailabilityModel().train(pairs)
     proj = avail.attach_to_projections(proj, features_now, target_season=season)
@@ -201,6 +218,11 @@ def build_board(season: int):
     # machinery; approximate with the veteran per-position quantiles applied
     # to the rookie point estimate (wider-uncertainty caveat rendered in UI).
     board = merge_rookie_projections(proj, rookies)
+    # Pure-model season total: hybrid per-game × expected games for veterans;
+    # rookies have no market blend, so their projection is already "pure".
+    board["pure_fpts_season"] = (
+        board.get("pure_fpts_pg") * board["projected_games"]
+    ).fillna(board["projected_fpts_season"])
     rk = board["rookie"].fillna(False) & board["season_p50"].isna()
     for pos in POSITIONS:
         mask = rk & (board["position"] == pos)
@@ -226,15 +248,26 @@ def build_board(season: int):
 
 
 def attach_market(board: pd.DataFrame, season: int) -> pd.DataFrame:
-    """ADP join + predicted_adp ladder + adp_edge (12-team PPR market)."""
+    """ADP join + predicted_adp ladder + adp_edge (12-team PPR market).
+
+    predicted_adp / adp_edge rank by the PURE (pre-market-blend) hybrid —
+    the served ensemble contains ADP, so ranking by it would make the edge
+    self-referential and shrink it toward zero by construction.
+    """
     from data.adp import load_adp, attach_adp
 
     adp_now = load_adp([season])
     if adp_now.empty:
         raise RuntimeError(f"No ADP available for {season}")
 
-    board = board.sort_values("vorp_12_ppr", ascending=False).reset_index(drop=True)
+    # The ensemble's project() already joined an ADP column; drop it so the
+    # canonical join below owns the adp/adp_pos_rank columns.
+    board = board.drop(columns=["adp", "adp_pos_rank", "adp_matched"], errors="ignore")
+
+    rank_col = "pure_fpts_season" if "pure_fpts_season" in board.columns else "vorp_12_ppr"
+    board = board.sort_values(rank_col, ascending=False).reset_index(drop=True)
     board["model_overall_rank"] = np.arange(1, len(board) + 1)
+    board = board.sort_values("vorp_12_ppr", ascending=False).reset_index(drop=True)
     board["projected_season"] = season
     board = attach_adp(board, adp_now, season_offset=0, season_col="projected_season")
 
@@ -373,20 +406,23 @@ def build_players_json(board: pd.DataFrame, features_now: pd.DataFrame,
 
 
 def build_trust_json(pairs: pd.DataFrame, resids, rq) -> dict:
+    """Evaluate the model the site actually serves (the market ensemble)."""
     from data.adp import load_adp, attach_adp
     from models.market import rolling_market_backtest, market_baseline
     from models.backtest import rolling_backtest
-    from models.hybrid import HybridProjectionModel
+    from models.market_ensemble import MarketEnsembleModel
     from models.stability import compute_factor_stability
 
     adp = load_adp(list(range(2015, 2025)))
 
     print("trust: accuracy backtest...")
-    bt = rolling_backtest(HybridProjectionModel, pairs,
-                          test_seasons=TRUST_TEST_SEASONS, age_adjust=False)
+    bt = rolling_backtest(MarketEnsembleModel, pairs,
+                          test_seasons=TRUST_TEST_SEASONS,
+                          adp_history=adp, age_adjust=False)
     print("trust: market backtest...")
-    mkt = rolling_market_backtest(HybridProjectionModel, pairs, adp,
-                                  test_seasons=TRUST_TEST_SEASONS, age_adjust=False)
+    mkt = rolling_market_backtest(MarketEnsembleModel, pairs, adp,
+                                  test_seasons=TRUST_TEST_SEASONS,
+                                  adp_history=adp, age_adjust=False)
     baseline = market_baseline(attach_adp(pairs, adp, season_offset=1))
 
     cov_wide = rq.coverage_report(resids, lo=0.10, hi=0.90)
@@ -644,6 +680,8 @@ def main() -> int:
         "adp_snapshot_date": adp_snapshot,
         "adp_format": f"{ADP_TEAMS}-team {ADP_FORMAT}",
         "stdev_synthetic": False,
+        "model_stack": "v5 market ensemble (career-augmented hybrid × isotonic ADP prior); "
+                       "adp_edge ranked by the pre-blend hybrid",
     }
 
     errors = validate(players, trust, adp_board, adp_stats)

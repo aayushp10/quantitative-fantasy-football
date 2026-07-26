@@ -53,6 +53,22 @@ changed.
   2024 pair-season is excluded from the market backtest because FFC has no
   2025 ADP archive.
 
+## v5 model serving split
+
+- **The board serves the market ensemble; edges serve the pure hybrid.**
+  From the v5 upgrade the exported projections (rankings, VORP, tiers,
+  season quantiles, draft recommendations) come from
+  `MarketEnsembleModel` (career-augmented hybrid blended toward an
+  isotonic ADP prior — the best-evaluated forecast). But
+  `predicted_adp`/`adp_edge` are ranked by the **pre-blend hybrid**: the
+  ensemble contains ADP by construction, so measuring it against ADP
+  would shrink every edge toward zero and the Vs-Market product would go
+  blank. The UI labels the edge as the "pre-market model" opinion.
+- **Prediction intervals are calibrated on the served model's residuals**
+  (walk-forward residuals of the ensemble, not the hybrid), and
+  `trust.json` backtests the ensemble — the trust page evaluates exactly
+  what the board serves.
+
 ## Phase 2 — API / draft engine
 
 - **Bot position caps derived from roster config**: max QB = QB starters
