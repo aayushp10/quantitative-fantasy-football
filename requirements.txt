@@ -16,3 +16,6 @@ openpyxl>=3.1
 # Web app (webapp/)
 fastapi>=0.110
 uvicorn[standard]>=0.29
+
+# Model (v5)
+lightgbm>=4.3   # macOS: needs `brew install libomp`
