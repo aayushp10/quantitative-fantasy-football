@@ -261,12 +261,32 @@ def attach_market(board: pd.DataFrame, season: int) -> pd.DataFrame:
     board["projected_season"] = season
     board = attach_adp(board, adp_now, season_offset=0, season_col="projected_season")
 
-    ladder = np.sort(adp_now["adp"].values)
-    idx = np.minimum(board["model_overall_rank"].values - 1, len(ladder) - 1)
-    pred = ladder[idx]
-    overflow = board["model_overall_rank"].values > len(ladder)
-    board["predicted_adp"] = np.round(np.where(
-        overflow, ladder[-1] + (board["model_overall_rank"].values - len(ladder)), pred), 1)
+    # Rank→ladder mapping is done WITHIN each position, on that position's
+    # own ADP ladder. Mapping overall VORP rank onto the overall ladder
+    # conflates model opinion with the market's positional-scarcity pricing
+    # (a 1-QB market drafts QBs far below their VORP), which manufactured
+    # huge "edges" for every mid-QB even when the model agreed with the
+    # market about the player.
+    board["predicted_adp"] = np.nan
+    for pos, pos_idx in board.groupby("position", observed=True).groups.items():
+        pos_ladder = np.sort(adp_now.loc[adp_now["position"] == pos, "adp"].values)
+        if len(pos_ladder) == 0:
+            continue
+        sub = board.loc[pos_idx].sort_values("vorp_12_ppr", ascending=False)
+        ranks = np.arange(1, len(sub) + 1)
+        idx = np.minimum(ranks - 1, len(pos_ladder) - 1)
+        pred = pos_ladder[idx]
+        # Overflow past the drafted universe: extrapolate at the ladder's
+        # typical late spacing (capped — the last rung's gap can be a
+        # one-off outlier that explodes deep-tail edges).
+        if len(pos_ladder) > 5:
+            tail_gap = float(np.clip(np.median(np.diff(pos_ladder[-6:])), 1.0, 6.0))
+        else:
+            tail_gap = 1.0
+        overflow = ranks > len(pos_ladder)
+        pred = np.where(overflow, pos_ladder[-1] + (ranks - len(pos_ladder)) * tail_gap, pred)
+        board.loc[sub.index, "predicted_adp"] = np.round(pred, 1)
+
     board["adp_edge"] = (board["adp"] - board["predicted_adp"]).round(1)
     return board
 
