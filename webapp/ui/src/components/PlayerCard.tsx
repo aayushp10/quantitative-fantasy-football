@@ -155,12 +155,12 @@ export function PlayerCard({ p, format }: { p: PlayerDetail; format: string }) {
           <Tile
             label="model ADP"
             value={<span className="text-accent">{fmtAdp(p.predicted_adp)}</span>}
-            hint="pre-market model: the ranking before the ADP blend"
+            hint="the model's board order priced on the market's ADP ladder"
           />
           <Tile
             label="edge"
             value={<span className={edgeClass(p.adp_edge)}>{fmtSigned(p.adp_edge)}</span>}
-            hint="positive: market lets you draft later than the pre-market model values them"
+            hint="positive: market lets you draft later than the model values them"
           />
         </div>
 

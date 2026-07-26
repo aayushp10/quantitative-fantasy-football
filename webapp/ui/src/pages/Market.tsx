@@ -101,7 +101,7 @@ export default function Market() {
       <div className="flex items-center gap-3 mb-3">
         <Segmented options={POSITIONS} value={pos} onChange={setPos} />
         <span className="text-[12px] text-ink-mute">
-          edge = ADP − model-implied ADP (pre-market model — the ranking before the ADP blend).{" "}
+          edge = ADP − model-implied ADP (the served model's board order priced on the market's ladder).{" "}
           <span className="text-edge-pos">+ market lets you wait</span> ·{" "}
           <span className="text-edge-neg">− you must reach</span> · draft-relevant universe (ADP ≤ {MAX_ADP})
         </span>

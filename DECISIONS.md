@@ -53,17 +53,21 @@ changed.
   2024 pair-season is excluded from the market backtest because FFC has no
   2025 ADP archive.
 
-## v5 model serving split
+## v5 model serving (unsplit)
 
-- **The board serves the market ensemble; edges serve the pure hybrid.**
-  From the v5 upgrade the exported projections (rankings, VORP, tiers,
-  season quantiles, draft recommendations) come from
-  `MarketEnsembleModel` (career-augmented hybrid blended toward an
-  isotonic ADP prior — the best-evaluated forecast). But
-  `predicted_adp`/`adp_edge` are ranked by the **pre-blend hybrid**: the
-  ensemble contains ADP by construction, so measuring it against ADP
-  would shrink every edge toward zero and the Vs-Market product would go
-  blank. The UI labels the edge as the "pre-market model" opinion.
+- **One model everywhere.** The exported projections (rankings, VORP,
+  tiers, season quantiles, draft recommendations) AND
+  `predicted_adp`/`adp_edge` all come from `MarketEnsembleModel`
+  (career-augmented hybrid blended toward an isotonic ADP prior).
+  Originally the edges were ranked by the pre-blend hybrid to keep them
+  at full strength; the user chose the unsplit version for coherence
+  (one board order, one edge story). Consequence, documented: the
+  ensemble contains ADP, so *marginal* disagreements compress toward
+  the market — but because the edge is computed in rank-ladder space,
+  disagreements strong enough to survive the blend (a player the model
+  keeps ranked far from their price) retain their full pick
+  displacement. Expect fewer, stronger edges rather than many shrunken
+  ones.
 - **Prediction intervals are calibrated on the served model's residuals**
   (walk-forward residuals of the ensemble, not the hybrid), and
   `trust.json` backtests the ensemble — the trust page evaluates exactly

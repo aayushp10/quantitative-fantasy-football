@@ -180,11 +180,6 @@ def build_board(season: int):
 
     proj = model.project(features_now, season=season)
 
-    # Pure (pre-market) hybrid projection for adp_edge semantics
-    pure = model._base.project(features_now, season=season)
-    pure_pg = pure.set_index("player_id")["projected_fpts_pg"]
-    proj["pure_fpts_pg"] = proj["player_id"].map(pure_pg)
-
     avail = AvailabilityModel().train(pairs)
     proj = avail.attach_to_projections(proj, features_now, target_season=season)
     proj = simulate_season_totals(proj, rq, target_season=season, games_sd=avail.residual_std_)
@@ -218,11 +213,6 @@ def build_board(season: int):
     # machinery; approximate with the veteran per-position quantiles applied
     # to the rookie point estimate (wider-uncertainty caveat rendered in UI).
     board = merge_rookie_projections(proj, rookies)
-    # Pure-model season total: hybrid per-game × expected games for veterans;
-    # rookies have no market blend, so their projection is already "pure".
-    board["pure_fpts_season"] = (
-        board.get("pure_fpts_pg") * board["projected_games"]
-    ).fillna(board["projected_fpts_season"])
     rk = board["rookie"].fillna(False) & board["season_p50"].isna()
     for pos in POSITIONS:
         mask = rk & (board["position"] == pos)
@@ -250,9 +240,11 @@ def build_board(season: int):
 def attach_market(board: pd.DataFrame, season: int) -> pd.DataFrame:
     """ADP join + predicted_adp ladder + adp_edge (12-team PPR market).
 
-    predicted_adp / adp_edge rank by the PURE (pre-market-blend) hybrid —
-    the served ensemble contains ADP, so ranking by it would make the edge
-    self-referential and shrink it toward zero by construction.
+    Unsplit (user decision): predicted_adp / adp_edge rank by the SERVED
+    ensemble, the same model that orders the board. The ensemble contains
+    ADP, so marginal disagreements compress toward the market; because the
+    edge lives in rank-ladder space, disagreements strong enough to survive
+    the blend keep their full displacement.
     """
     from data.adp import load_adp, attach_adp
 
@@ -264,10 +256,8 @@ def attach_market(board: pd.DataFrame, season: int) -> pd.DataFrame:
     # canonical join below owns the adp/adp_pos_rank columns.
     board = board.drop(columns=["adp", "adp_pos_rank", "adp_matched"], errors="ignore")
 
-    rank_col = "pure_fpts_season" if "pure_fpts_season" in board.columns else "vorp_12_ppr"
-    board = board.sort_values(rank_col, ascending=False).reset_index(drop=True)
-    board["model_overall_rank"] = np.arange(1, len(board) + 1)
     board = board.sort_values("vorp_12_ppr", ascending=False).reset_index(drop=True)
+    board["model_overall_rank"] = np.arange(1, len(board) + 1)
     board["projected_season"] = season
     board = attach_adp(board, adp_now, season_offset=0, season_col="projected_season")
 
@@ -681,7 +671,7 @@ def main() -> int:
         "adp_format": f"{ADP_TEAMS}-team {ADP_FORMAT}",
         "stdev_synthetic": False,
         "model_stack": "v5 market ensemble (career-augmented hybrid × isotonic ADP prior); "
-                       "adp_edge ranked by the pre-blend hybrid",
+                       "unsplit — adp_edge ranked by the served ensemble",
     }
 
     errors = validate(players, trust, adp_board, adp_stats)
