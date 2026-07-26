@@ -4,11 +4,19 @@ exposed so the UI can render "why this pick" verbatim.
 
     need_weight   remaining starter+flex slots at pos ÷ remaining picks,
                   normalized to [0, 1] across positions
-    tier_drop     vorp(p) − vorp(best player in the next tier down at pos)
-    urgency       (1 − p_survive) × max(tier_drop, 0)
-    rec_score     vorp × need_multiplier(need_weight) + urgency
+    vona          vorp(p) − E[best VORP available at pos at the user's
+                  next pick] (survival Monte Carlo joint outcomes)
+    urgency       max(vona, 0) — expected regret of deferring the position
+    alpha_points  fair − market season points from the alpha overlay
+                  (λ-shrunk market-residual model; 0 where unavailable)
+    rec_score     vorp × need_multiplier + urgency + ALPHA_REC_WEIGHT × alpha_points
 
 need_multiplier maps need_weight linearly into [0.85, 1.15].
+ALPHA_REC_WEIGHT is deliberately conservative (0.5): alpha is already
+shrunk toward the market, and the ensemble projection behind vorp carries
+some of the same fundamental signal — full weight would double-count.
+tier_drop (vorp minus the best player in the next tier down) is still
+exposed for the UI's tier-cliff framing, but no longer drives the score.
 """
 from __future__ import annotations
 
@@ -20,11 +28,13 @@ from .. import store
 from .draft import Draft
 from .pool import POS_IDX
 from .survival import p_survive
+from .vona import expected_next_best, vona_for
 
 POOL_SIZE = 40
 TIER_CLIFF_VORP = 15.0
 TIER_CLIFF_REMAINING = 2
 SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
+ALPHA_REC_WEIGHT = 0.5
 
 
 def need_weights(draft: Draft) -> dict[str, float]:
@@ -126,6 +136,8 @@ def recommendations(draft: Draft, n: int = 6) -> dict:
     cand = np.flatnonzero(avail & np.isfinite(pool.vorp) & pool.has_projection)
     cand = cand[np.argsort(-pool.vorp[cand])][:POOL_SIZE]
 
+    next_best = expected_next_best(draft)
+
     recs = []
     for idx in cand:
         pos = pool.positions[idx]
@@ -135,10 +147,12 @@ def recommendations(draft: Draft, n: int = 6) -> dict:
         nt_best = next_tier_best_for_player(draft, avail, int(idx))
         tier_drop = (vorp - nt_best) if nt_best is not None else 0.0
         ps = float(surv[idx])
-        urgency = (1.0 - ps) * max(tier_drop, 0.0)
-        rec_score = vorp * mult + urgency
-
+        vona = vona_for(draft, int(idx), next_best)
+        urgency = max(vona, 0.0) if vona is not None else 0.0
         player = by_id.get(pool.ids[idx], {})
+        alpha_pts = player.get("alpha_points") or 0.0
+        rec_score = vorp * mult + urgency + ALPHA_REC_WEIGHT * alpha_pts
+
         recs.append({
             "player_id": pool.ids[idx],
             "name": pool.names[idx],
@@ -158,7 +172,11 @@ def recommendations(draft: Draft, n: int = 6) -> dict:
             "need_weight": round(nw, 3),
             "need_multiplier": round(mult, 3),
             "tier_drop": round(tier_drop, 1),
+            "vona": round(vona, 1) if vona is not None else None,
             "urgency": round(urgency, 2),
+            "alpha_points": round(alpha_pts, 1) if player.get("alpha_points") is not None else None,
+            "fair_adp": player.get("fair_adp"),
+            "fair_adp_edge": player.get("fair_adp_edge"),
             "rec_score": round(rec_score, 2),
         })
 
@@ -167,6 +185,9 @@ def recommendations(draft: Draft, n: int = 6) -> dict:
         "recommendations": recs[:n],
         "pool_size": len(recs),
         "need_weights": {p: round(w, 3) for p, w in weights.items()},
+        "expected_next_best": {
+            p: (round(v, 1) if v is not None else None) for p, v in next_best.items()
+        },
         "tier_structure": structure,
         "tier_cliff_alerts": tier_cliff_alerts(structure),
     }

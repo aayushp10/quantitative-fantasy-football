@@ -31,5 +31,5 @@ web:
 	wait
 
 web-test:
-	$(PY) -m pytest tests/test_draft_engine.py tests/test_web_api.py -q
+	$(PY) -m pytest tests/test_draft_engine.py tests/test_draft_policies.py tests/test_web_api.py -q
 	cd webapp/ui && npx tsc --noEmit

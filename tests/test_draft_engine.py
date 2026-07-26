@@ -225,11 +225,13 @@ def test_recommendations_schema_and_score_composition():
                 "adp", "adp_edge", "p_survive", "need_weight", "need_multiplier",
                 "tier_drop", "urgency", "rec_score",
                 "season_p10", "season_p25", "season_p50", "season_p75", "season_p90"}
+    from webapp.api.engine.recommend import ALPHA_REC_WEIGHT
     for r in out["recommendations"]:
         assert required <= set(r), f"missing {required - set(r)}"
         # Components sum to rec_score (rounding tolerance)
-        expected = r["vorp"] * r["need_multiplier"] + r["urgency"]
-        assert abs(expected - r["rec_score"]) < 0.1, r
+        expected = (r["vorp"] * r["need_multiplier"] + r["urgency"]
+                    + ALPHA_REC_WEIGHT * (r.get("alpha_points") or 0.0))
+        assert abs(expected - r["rec_score"]) < 0.15, r
         assert 0.85 <= r["need_multiplier"] <= 1.15
         assert 0.0 <= r["p_survive"] <= 1.0
     scores = [r["rec_score"] for r in out["recommendations"]]

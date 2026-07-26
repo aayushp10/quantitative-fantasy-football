@@ -17,23 +17,26 @@ from .pool import POS_ORDER
 M_SIMS = 300
 
 
-def p_survive(draft: Draft) -> np.ndarray:
+def survival_alive(draft: Draft) -> np.ndarray:
     """
-    Survival probability per pool index, at the user's current pick.
-    Already-drafted players get 0; if the draft is over or there are no
-    intervening bot picks, available players get 1.
+    (M_SIMS, n) boolean matrix: player availability at the user's next pick,
+    per survival simulation. Rows are joint outcomes — within one sim the
+    intervening bot picks are mutually consistent, so per-position order
+    statistics (e.g. the best VORP still alive) are valid, not just marginals.
+    If the draft is over or there are no intervening bot picks, every row is
+    the current availability mask.
     """
-    key = draft.next_overall
+    key = ("alive", draft.next_overall)
     cached = draft._survival_cache.get(key)
     if cached is not None:
         return cached
 
     avail = draft.available_mask()
-    out = avail.astype(float)
 
     next_user = draft.next_user_overall()
     otc = draft.on_the_clock()
     if otc is None or next_user is None:
+        out = np.tile(avail, (M_SIMS, 1))
         draft._survival_cache[key] = out
         return out
 
@@ -43,12 +46,13 @@ def p_survive(draft: Draft) -> np.ndarray:
         if slot_for_pick(ov, draft.config.teams)[1] != draft.config.user_slot
     ]
     if not intervening:
+        out = np.tile(avail, (M_SIMS, 1))
         draft._survival_cache[key] = out
         return out
 
     pool = draft.pool
     n = pool.n
-    rng = np.random.default_rng((seed_from_id(draft.draft_id), key, 7919))
+    rng = np.random.default_rng((seed_from_id(draft.draft_id), draft.next_overall, 7919))
 
     # Fresh board noise per sim (bot model), shared across that sim's picks
     values = pool.adp[None, :] + rng.normal(0.0, 1.0, size=(M_SIMS, n)) * pool.stdev[None, :]
@@ -79,6 +83,23 @@ def p_survive(draft: Draft) -> np.ndarray:
         counts[slot][rows, picked_pos] += 1
         made[slot][rows] += 1
 
+    draft._survival_cache[key] = alive
+    return alive
+
+
+def p_survive(draft: Draft) -> np.ndarray:
+    """
+    Survival probability per pool index, at the user's current pick.
+    Already-drafted players get 0; if the draft is over or there are no
+    intervening bot picks, available players get 1.
+    """
+    key = draft.next_overall
+    cached = draft._survival_cache.get(key)
+    if cached is not None:
+        return cached
+
+    avail = draft.available_mask()
+    alive = survival_alive(draft)
     out = np.where(avail, alive.mean(axis=0), 0.0)
     draft._survival_cache[key] = out
     return out
