@@ -5,6 +5,8 @@ output/
 *.parquet
 *.csv
 *.db
+# ...except durable ADP snapshots (small; the 2025 archive hole must not recur)
+!data/adp_archive/*.parquet
 
 # Python
 __pycache__/
