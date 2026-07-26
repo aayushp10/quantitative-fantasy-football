@@ -25,6 +25,8 @@ export function AvailableTable({
   canPick,
   onPick,
   onInspect,
+  queued,
+  onToggleQueue,
 }: {
   state: DraftState;
   playersById: Map<string, Player>;
@@ -33,9 +35,12 @@ export function AvailableTable({
   canPick: boolean;
   onPick: (id: string) => void;
   onInspect: (id: string) => void;
+  queued: Set<string>;
+  onToggleQueue: (id: string) => void;
 }) {
   const [pos, setPos] = useState("ALL");
   const [q, setQ] = useState("");
+  const [sortKey, setSortKey] = useState<"vorp" | "fair adp" | "adp">("vorp");
 
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
@@ -54,16 +59,24 @@ export function AvailableTable({
         streamer: adp?.streamer ?? false,
       });
     }
-    out.sort((a, b) => {
-      const av = a.player?.vorp;
-      const bv = b.player?.vorp;
-      if (av != null && bv != null) return bv - av;
-      if (av != null) return -1;
-      if (bv != null) return 1;
-      return (a.adp ?? 999) - (b.adp ?? 999);
-    });
+    // asc sorts put nulls last; vorp (desc) puts nulls last too
+    const nullLast = (v: number | null | undefined) => (v == null ? Infinity : v);
+    if (sortKey === "adp") {
+      out.sort((a, b) => nullLast(a.adp) - nullLast(b.adp));
+    } else if (sortKey === "fair adp") {
+      out.sort((a, b) => nullLast(a.player?.fair_adp) - nullLast(b.player?.fair_adp));
+    } else {
+      out.sort((a, b) => {
+        const av = a.player?.vorp;
+        const bv = b.player?.vorp;
+        if (av != null && bv != null) return bv - av;
+        if (av != null) return -1;
+        if (bv != null) return 1;
+        return nullLast(a.adp) - nullLast(b.adp);
+      });
+    }
     return out;
-  }, [state.available, playersById, adpById, surviveById]);
+  }, [state.available, playersById, adpById, surviveById, sortKey]);
 
   const filtered = useMemo(() => {
     let out = rows;
@@ -82,6 +95,12 @@ export function AvailableTable({
       <div className="flex items-center gap-3 mb-2">
         <span className="text-[11px] uppercase tracking-[0.1em] text-ink-mute">available</span>
         <Segmented options={POSITIONS} value={pos} onChange={setPos} />
+        <span className="text-[10px] uppercase tracking-wide text-ink-mute ml-2">sort</span>
+        <Segmented
+          options={["vorp", "fair adp", "adp"]}
+          value={sortKey}
+          onChange={(v) => setSortKey(v as "vorp" | "fair adp" | "adp")}
+        />
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -101,6 +120,9 @@ export function AvailableTable({
               <th>p10–p90</th>
               <th className="num">adp</th>
               <th className="num">edge</th>
+              <th className="num" title="alpha model's fair draft slot: market + λ·predicted residual, mapped onto the position's ADP ladder">
+                fair adp
+              </th>
               <th className="num">surv</th>
               <th></th>
             </tr>
@@ -147,13 +169,40 @@ export function AvailableTable({
                   {fmtSigned(r.player?.adp_edge ?? null)}
                 </td>
                 <td className="num">
+                  {r.player?.fair_adp == null ? (
+                    <span className="text-ink-mute">–</span>
+                  ) : (
+                    <>
+                      {fmtAdp(r.player.fair_adp)}
+                      {r.player.alpha_source === "model" &&
+                        r.player.fair_adp_edge != null &&
+                        Math.abs(r.player.fair_adp_edge) >= 0.5 && (
+                          <span className={`ml-1 text-[10.5px] ${edgeClass(r.player.fair_adp_edge)}`}>
+                            {fmtSigned(r.player.fair_adp_edge, 0)}
+                          </span>
+                        )}
+                    </>
+                  )}
+                </td>
+                <td className="num">
                   {r.p_survive == null ? "–" : (
                     <span className={r.p_survive < 0.4 ? "text-edge-neg" : ""}>
                       {fmtPct(r.p_survive)}
                     </span>
                   )}
                 </td>
-                <td>
+                <td className="whitespace-nowrap">
+                  <button
+                    onClick={() => onToggleQueue(r.player_id)}
+                    className={`px-2 py-0.5 text-[11px] mr-1 ${
+                      queued.has(r.player_id)
+                        ? "text-accent"
+                        : "text-ink-mute hover:text-ink"
+                    }`}
+                    title={queued.has(r.player_id) ? "remove from queue" : "add to queue"}
+                  >
+                    {queued.has(r.player_id) ? "−q" : "+q"}
+                  </button>
                   <button
                     onClick={() => onPick(r.player_id)}
                     disabled={!canPick}

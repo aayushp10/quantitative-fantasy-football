@@ -112,3 +112,39 @@ def test_draft_flow_and_latency():
     assert r.json()["state"]["on_the_clock"]["overall"] == 7
 
     assert client.get("/api/drafts/doesnotexist").status_code == 404
+
+
+def test_paced_draft_step_flow():
+    """auto_advance=False + /step: the client paces bot picks one at a time."""
+    r = client.post("/api/drafts", json={
+        "teams": 12, "user_slot": 3, "rounds": 15, "format": "12_ppr",
+        "roster": {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1, "BN": 7, "K": 0, "DST": 0},
+        "auto_advance": False,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    did = body["draft_id"]
+    try:
+        assert body["events"] == []
+        assert body["state"]["on_the_clock"] == {
+            "overall": 1, "round": 1, "slot": 1, "is_user": False}
+
+        # Two bot steps land the user on the clock (slot 3)
+        for expected in (1, 2):
+            s = client.post(f"/api/drafts/{did}/step").json()
+            assert s["event"]["overall"] == expected
+        s = client.post(f"/api/drafts/{did}/step").json()
+        assert s["event"] is None                       # user on clock -> no-op
+        assert s["on_the_clock"]["is_user"]
+
+        # advance=False leaves the next bot un-stepped
+        top = client.get(f"/api/drafts/{did}/recommendations?n=1").json()["recommendations"][0]
+        p = client.post(f"/api/drafts/{did}/pick",
+                        json={"player_id": top["player_id"], "advance": False}).json()
+        assert p["events"]["bot_picks"] == []
+        assert p["state"]["on_the_clock"] == {
+            "overall": 4, "round": 1, "slot": 4, "is_user": False}
+        s = client.post(f"/api/drafts/{did}/step").json()
+        assert s["event"]["overall"] == 4 and not s["event"]["is_user"]
+    finally:
+        (store.DRAFTS_DIR / f"{did}.json").unlink(missing_ok=True)

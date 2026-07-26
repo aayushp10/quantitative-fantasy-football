@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from . import store
 from .engine.draft import Draft, DraftConfig
 from .engine.recommend import recommendations, tier_cliff_alerts, tier_structure
+from .engine.rollout import rollout_recommendations
 from .engine.survival import p_survive
 
 router = APIRouter(prefix="/api/drafts", tags=["drafts"])
@@ -30,10 +31,13 @@ class CreateDraft(BaseModel):
     rounds: int = Field(16, ge=4, le=25)
     format: str = "12_ppr"
     roster: dict[str, int] = Field(default_factory=lambda: dict(DEFAULT_ROSTER))
+    # False -> bots don't run automatically; the client paces them via /step
+    auto_advance: bool = True
 
 
 class PickBody(BaseModel):
     player_id: str
+    advance: bool = True
 
 
 def _get(draft_id: str) -> Draft:
@@ -79,7 +83,7 @@ def create_draft(body: CreateDraft):
     )
     draft_id = secrets.token_hex(4)
     d = Draft.create(draft_id, cfg)
-    events = d.advance_bots()  # bots before the user's first pick
+    events = d.advance_bots() if body.auto_advance else []
     d.save(store.DRAFTS_DIR)
     _drafts[draft_id] = d
     return {"draft_id": draft_id, "events": events, "state": _state(d)}
@@ -97,7 +101,7 @@ def make_pick(draft_id: str, body: PickBody):
         user_pick = d.user_pick(body.player_id)
     except ValueError as e:
         raise HTTPException(409, str(e))
-    bot_events = d.advance_bots()
+    bot_events = d.advance_bots() if body.advance else []
     d.save(store.DRAFTS_DIR)
     alerts = []
     if not d.complete:
@@ -131,3 +135,31 @@ def get_recommendations(draft_id: str, n: int = 6):
     if not otc["is_user"]:
         raise HTTPException(409, "recommendations are only available on your pick")
     return recommendations(d, n=n)
+
+
+@router.post("/{draft_id}/step")
+def step(draft_id: str):
+    """Advance exactly one bot pick — the client paces the draft with this.
+
+    No-op (event: null) when the user is on the clock or the draft is over,
+    so the client can call it blindly without racing the state machine.
+    """
+    d = _get(draft_id)
+    otc = d.on_the_clock()
+    if otc is None or otc["is_user"]:
+        return {"event": None, "on_the_clock": otc, "complete": d.complete}
+    ev = d.bot_pick()
+    d.save(store.DRAFTS_DIR)
+    return {"event": ev, "on_the_clock": d.on_the_clock(), "complete": d.complete}
+
+
+@router.get("/{draft_id}/rollout")
+def get_rollout(draft_id: str, n: int = 8, sims: int = 24):
+    """Rank candidate picks by simulated completed-roster utility."""
+    d = _get(draft_id)
+    if d.complete:
+        return {"candidates": [], "complete": True}
+    otc = d.on_the_clock()
+    if not otc["is_user"]:
+        raise HTTPException(409, "rollouts are only available on your pick")
+    return rollout_recommendations(d, n_candidates=min(n, 12), n_sims=min(sims, 100))

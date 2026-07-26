@@ -46,6 +46,9 @@ export function SidePanel({
   busy,
   onUndo,
   onExit,
+  queue,
+  onQueueRemove,
+  onQueueMove,
 }: {
   state: DraftState;
   playersById: Map<string, Player>;
@@ -55,6 +58,9 @@ export function SidePanel({
   busy: boolean;
   onUndo: () => void;
   onExit: () => void;
+  queue: string[];
+  onQueueRemove: (id: string) => void;
+  onQueueMove: (id: string, dir: -1 | 1) => void;
 }) {
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -115,6 +121,57 @@ export function SidePanel({
           ))}
         </tbody>
       </table>
+
+      <div className="text-[11px] uppercase tracking-[0.08em] text-ink-mute mb-1">
+        queue{" "}
+        <span className="normal-case tracking-normal text-[10.5px]">
+          · autodrafts top-down if your clock runs out
+        </span>
+      </div>
+      {queue.length === 0 ? (
+        <div className="text-[12px] text-ink-mute mb-3">
+          empty — use “+q” in the available table
+        </div>
+      ) : (
+        <table className="data mb-3">
+          <tbody>
+            {queue.map((pid, i) => {
+              const label = name(pid) ?? pid;
+              return (
+                <tr key={pid}>
+                  <td className="num text-ink-mute w-6">{i + 1}</td>
+                  <td>{label}</td>
+                  <td className="w-20 text-right whitespace-nowrap">
+                    <button
+                      onClick={() => onQueueMove(pid, -1)}
+                      disabled={i === 0}
+                      className="text-ink-mute hover:text-ink disabled:opacity-25 px-1"
+                      aria-label={`move ${label} up`}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      onClick={() => onQueueMove(pid, 1)}
+                      disabled={i === queue.length - 1}
+                      className="text-ink-mute hover:text-ink disabled:opacity-25 px-1"
+                      aria-label={`move ${label} down`}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      onClick={() => onQueueRemove(pid)}
+                      className="text-ink-mute hover:text-edge-neg px-1"
+                      aria-label={`remove ${label} from queue`}
+                    >
+                      ×
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
 
       {needWeights && (
         <>

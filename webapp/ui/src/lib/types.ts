@@ -60,6 +60,12 @@ export interface Player {
   adp: number | null;
   predicted_adp: number | null;
   adp_edge: number | null;
+  market_points: number | null;
+  fair_points: number | null;
+  alpha_points: number | null;
+  fair_adp: number | null;
+  fair_adp_edge: number | null;
+  alpha_source: "model" | "market_only" | null;
   features: PlayerFeatures;
 }
 
@@ -102,6 +108,37 @@ export interface TrustData {
     tier: string;
     n_seasons: number;
   }[];
+  alpha?: {
+    lambda: number;
+    lambda_se: number;
+    lambda_n: number;
+    n_scored_now: number;
+    n_market_only_now: number;
+    per_season: {
+      season: number;
+      residual_ic: number;
+      ci_lo: number;
+      ci_hi: number;
+      n: number;
+      hit_rate: number;
+    }[];
+    pooled: {
+      residual_ic: number;
+      ci_lo: number;
+      ci_hi: number;
+      n: number;
+      n_seasons: number;
+      pct_seasons_positive: number | null;
+    };
+    incremental: {
+      season: number;
+      market_ic: number;
+      fair_ic: number;
+      inc_ic: number;
+      n: number;
+    }[];
+    coefficients: { feature: string; coef: number }[];
+  };
 }
 
 export interface Pick {
@@ -131,6 +168,12 @@ export interface DraftState {
   available: { player_id: string; p_survive: number | null }[];
 }
 
+export interface StepResult {
+  event: Pick | null;
+  on_the_clock: { overall: number; round: number; slot: number; is_user: boolean } | null;
+  complete: boolean;
+}
+
 export interface TierCliffAlert {
   position: string;
   tier: number;
@@ -157,7 +200,11 @@ export interface Recommendation {
   need_weight: number;
   need_multiplier: number;
   tier_drop: number;
+  vona: number | null;
   urgency: number;
+  alpha_points: number | null;
+  fair_adp: number | null;
+  fair_adp_edge: number | null;
   rec_score: number;
 }
 
@@ -165,6 +212,7 @@ export interface Recommendations {
   recommendations: Recommendation[];
   pool_size: number;
   need_weights: Record<string, number>;
+  expected_next_best: Record<string, number | null>;
   tier_structure: Record<
     string,
     {
@@ -175,6 +223,24 @@ export interface Recommendations {
     }
   >;
   tier_cliff_alerts: TierCliffAlert[];
+}
+
+export interface RolloutCandidate {
+  player_id: string;
+  name: string;
+  position: string;
+  team: string | null;
+  vorp: number;
+  adp: number | null;
+  mean_utility: number;
+  se_utility: number;
+  delta_vs_best: number;
+  se_delta: number;
+}
+
+export interface RolloutResult {
+  candidates: RolloutCandidate[];
+  n_sims: number;
 }
 
 export interface AdpBoardRow {

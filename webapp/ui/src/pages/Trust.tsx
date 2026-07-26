@@ -152,6 +152,87 @@ export default function Trust() {
         same for shorts. Consistently positive = the disagreement carries information.
       </p>
 
+      {data.alpha && (
+        <>
+          <SectionTitle>Can we predict the market&apos;s error? (alpha model)</SectionTitle>
+          <p className="text-[12px] text-ink-soft mb-2 max-w-3xl">
+            Walk-forward test: each season, an isotonic ADP→points curve is fitted on
+            earlier seasons only (the &ldquo;market expectation&rdquo;), and a residual model —
+            trained only on earlier seasons — predicts how each player will beat or miss
+            his price. Residual IC is the rank correlation of predicted vs realized
+            market error. The board&apos;s <span className="num">fair adp</span> column is
+            this model applied to the current draft, shrunk by λ ={" "}
+            <span className="num">{fmtDec(data.alpha.lambda, 2)}</span> (±
+            <span className="num">{fmtDec(data.alpha.lambda_se, 2)}</span>).
+          </p>
+          <table className="data max-w-2xl">
+            <thead>
+              <tr>
+                <th>season</th>
+                <th className="num">residual IC</th>
+                <th className="num">95% CI</th>
+                <th className="num">top-decile hit rate</th>
+                <th className="num">n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.alpha.per_season.map((r) => (
+                <tr key={r.season}>
+                  <td className="num">{r.season}</td>
+                  {cell(r.residual_ic, 3, true)}
+                  <td className="num text-ink-mute">
+                    [{fmtDec(r.ci_lo, 2)}, {fmtDec(r.ci_hi, 2)}]
+                  </td>
+                  <td className="num">{fmtPct(r.hit_rate)}</td>
+                  <td className="num text-ink-mute">{r.n}</td>
+                </tr>
+              ))}
+              <tr className="font-semibold">
+                <td className="num">pooled</td>
+                {cell(data.alpha.pooled.residual_ic, 3, true)}
+                <td className="num text-ink-mute">
+                  [{fmtDec(data.alpha.pooled.ci_lo, 2)}, {fmtDec(data.alpha.pooled.ci_hi, 2)}]
+                </td>
+                <td className="num">
+                  {data.alpha.pooled.pct_seasons_positive != null
+                    ? `${fmtPct(data.alpha.pooled.pct_seasons_positive)} seasons +`
+                    : "–"}
+                </td>
+                <td className="num text-ink-mute">{data.alpha.pooled.n}</td>
+              </tr>
+            </tbody>
+          </table>
+          <table className="data max-w-2xl mt-3">
+            <thead>
+              <tr>
+                <th>season</th>
+                <th className="num">ADP-only IC</th>
+                <th className="num">fair IC</th>
+                <th className="num">incremental</th>
+                <th className="num">n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.alpha.incremental.map((r) => (
+                <tr key={r.season}>
+                  <td className="num">{r.season}</td>
+                  <td className="num">{fmtDec(r.market_ic, 3)}</td>
+                  <td className="num">{fmtDec(r.fair_ic, 3)}</td>
+                  {cell(r.inc_ic, 3, true)}
+                  <td className="num text-ink-mute">{r.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-[11px] text-ink-mute mt-1 max-w-3xl">
+            This season: {data.alpha.n_scored_now} priced players are model-scored;{" "}
+            {data.alpha.n_market_only_now} (rookies, thin histories) are carried at fair =
+            market. The overlay never re-ranks the board — bots draft real ADP and the
+            board ranks by the served projections; fair adp is a second opinion.
+          </p>
+        </>
+      )}
+
       <SectionTitle>Uncertainty calibration</SectionTitle>
       <table className="data max-w-lg">
         <thead>

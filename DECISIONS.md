@@ -128,3 +128,76 @@ changed.
 - The Trust verdict sentence is generated from the numbers and explicitly
   reconciles the two results (negative IC edge, positive L/S spread)
   rather than cherry-picking the favorable one.
+
+## Decision layer — VONA, roster utility, policy backtest, rollouts
+
+- **Urgency in the pick score is now VONA** (`engine/vona.py`): vorp minus
+  the expected best VORP still available at the position at the user's
+  next pick, computed from the survival Monte Carlo's *joint* alive states
+  (survival.py now exposes the per-sim alive matrix; p_survive is its
+  marginal mean). Replaces `(1 − p_survive) × tier_drop` — same structure,
+  but the "next best" comes from simulated boards instead of tier
+  boundaries. `tier_drop` stays exposed for the UI's tier-cliff framing.
+- **Roster utility v1** (`engine/roster_utility.py`):
+  `starter_p50 − 0.10 × Σ(p50−p10 of starters) + 0.15 × top-3 bench p50`,
+  greedy lineup fill (optimal for the nested slot structure). K/DST and
+  unfilled slots contribute zero — the zero for empty starter slots is the
+  penalty that punishes TE-less rosters. To be replaced by playoff /
+  championship probability once a weekly team simulator exists.
+- **Policy backtest** (`scripts/draft_policy_backtest.py`): full drafts
+  with the user played by a policy, paired across policies by sharing the
+  draft id (identical bot boards + reach rolls). On 40 paired drafts
+  (12-team PPR, 16 rounds, slots 1/4/7/10/12): adp +0, greedy_vorp +120,
+  heuristic_v1 +150, vona_v2 +157 utility vs the ADP baseline;
+  vona − heuristic paired delta +5.5 [−2.0, +12.9]. The v1 heuristic can
+  finish a draft with zero TEs (nothing in the formula ever forces the
+  position); tests assert legality only and let utility punish it.
+- **Rollouts** (`engine/rollout.py`, `GET /drafts/{id}/rollout`): rank the
+  top ~8 candidates by mean completed-roster utility over ~24 simulated
+  draft completions, common random numbers across candidates (paired
+  deltas), user's future picks by a cheap base policy (eligible best-VORP
+  + 25-pt unfilled-starter bonus), bots one shared noise board per sim as
+  in survival.py. Backtest (20 paired drafts, rollouts through round 8):
+  rollout − vona_v2 = +31.5 [+24.1, +38.8], 19/20 drafts.
+- **Alpha model gate PASSED** (`src/models/alpha.py`,
+  `output/experiments/alpha_v1/`): walk-forward residual IC pooled 0.161
+  (95% CIs exclude 0 under row and season-cluster bootstrap; 7/7 seasons
+  positive), incremental IC of shrunk fair values over the pure ADP map
+  +0.019 [+0.009, +0.029], λ ≈ 0.84 ± 0.16. Clears the way to serve
+  fair-value edges from market + λ·predicted-residual instead of fixed
+  blend weights.
+- **Rollouts in the draft room are on-demand** ("simulate rollouts" button
+  in the rec panel), not auto-fetched: a rollout costs ~1s vs ~50ms for
+  recommendations, and its result is cleared the moment the board changes.
+  The panel flags when the rollout winner disagrees with the heuristic top
+  pick, and Δ-vs-best is shown with its paired (common-random-numbers)
+  standard error. The "why this pick" table now explains the VONA formula.
+- **Sleeper-style draft room.** Bots no longer auto-advance: drafts are
+  created with `auto_advance: false` and the client paces one bot pick at a
+  time via `POST /drafts/{id}/step` (no-op when the user is on the clock,
+  so it can be called blindly; defaults unchanged for API back-compat).
+  The room adds a snake draft board grid (teams × rounds, position-colored
+  cards, auto-scroll, pulsing on-the-clock cell), a bot speed toggle
+  (slow/fast/instant), a pick clock chosen at setup (client-side, default
+  1:00) that autodrafts on expiry — queue first, then top recommendation,
+  then best VORP — and a player queue (localStorage per draft id, pruned
+  as players get drafted). /step returns a lite payload (event + clock);
+  the client merges it locally and only fetches full state (with survival
+  odds) when the user comes on the clock.
+- **Alpha serving is an overlay, not a re-rank (user decision).** Bots
+  draft real FFC ADP; the board ranks by the served ensemble projections.
+  The alpha model (fair = isotonic(ADP) + λ·predicted residual, λ from the
+  pooled OOS slope — 0.65 in this build) adds columns: market/fair/alpha
+  points, `fair_adp` (fair-points rank mapped onto the position's own ADP
+  ladder), `fair_adp_edge`. Priced players without alpha inputs (rookies,
+  thin histories) are carried at fair = market ("market_only") so the fair
+  ladder covers the whole priced universe; their small ladder-artifact
+  edges are not displayed (UI shows the edge chip only for model-scored
+  rows). Recommendations add ALPHA_REC_WEIGHT (0.5) × alpha_points —
+  conservative because the ensemble already carries some of the same
+  signal; the policy backtest keeps `vona_v2` (no alpha) alongside
+  `vona_alpha` since roster utility scores with the model's own p50 and
+  can't credit the alpha tilt. Trust page gains the walk-forward alpha
+  evidence (per-season residual IC + CIs, incremental IC of fair over
+  ADP, λ) computed fresh at build time — served numbers, not notebook
+  numbers.
