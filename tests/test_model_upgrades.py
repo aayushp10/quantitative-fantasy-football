@@ -208,3 +208,65 @@ def test_gbm_trains_and_predicts():
 
     imp = m.feature_importance("WR")
     assert imp.iloc[0]["feature"] == "target_share"  # dominant simulated driver
+
+
+# ---------------------------------------------------------------------------
+# Schedule context (Vegas week-1 + head-coach changes)
+# ---------------------------------------------------------------------------
+
+def _sched() -> pd.DataFrame:
+    rows = []
+    # Two seasons, two teams. 2020 opener: AAA home −3 vs BBB, total 44.
+    # 2021 opener: AAA home +7 (underdog) vs BBB, total 50. BBB coach changes in 2021.
+    rows.append({"season": 2020, "week": 1, "game_type": "REG", "home_team": "AAA",
+                 "away_team": "BBB", "spread_line": 3.0, "total_line": 44.0,
+                 "home_coach": "Smith", "away_coach": "Jones"})
+    rows.append({"season": 2021, "week": 1, "game_type": "REG", "home_team": "AAA",
+                 "away_team": "BBB", "spread_line": -7.0, "total_line": 50.0,
+                 "home_coach": "Smith", "away_coach": "Newguy"})
+    # A playoff game that must be ignored
+    rows.append({"season": 2020, "week": 1, "game_type": "POST", "home_team": "AAA",
+                 "away_team": "BBB", "spread_line": 99.0, "total_line": 99.0,
+                 "home_coach": "X", "away_coach": "Y"})
+    return pd.DataFrame(rows)
+
+
+def test_schedule_context_implied_points_and_coaches():
+    from features.schedule_context import build_schedule_context
+
+    ctx = build_schedule_context(_sched()).set_index(["team", "season"])
+    # home implied = (total + spread)/2, away = (total − spread)/2
+    assert ctx.loc[("AAA", 2020), "implied_pts_wk1"] == pytest.approx(23.5)
+    assert ctx.loc[("BBB", 2020), "implied_pts_wk1"] == pytest.approx(20.5)
+    assert ctx.loc[("AAA", 2021), "implied_pts_wk1"] == pytest.approx(21.5)
+    assert ctx.loc[("BBB", 2021), "implied_pts_wk1"] == pytest.approx(28.5)
+    assert ctx.loc[("BBB", 2020), "head_coach"] == "Jones"
+    assert ctx.loc[("BBB", 2021), "head_coach"] == "Newguy"
+
+
+def test_schedule_context_join_is_forward_looking():
+    from features.schedule_context import add_schedule_context_features
+
+    fm = pd.DataFrame([
+        {"player_id": "p1", "season": 2020, "team": "AAA", "fpts_per_game": 10.0},
+        {"player_id": "p2", "season": 2020, "team": "BBB", "fpts_per_game": 12.0},
+    ])
+    out = add_schedule_context_features(fm, schedules=_sched()).set_index("player_id")
+    # season-2020 rows carry the 2021 opener (the season being predicted)
+    assert out.loc["p1", "vegas_implied_pts_next"] == pytest.approx(21.5)
+    assert out.loc["p2", "vegas_implied_pts_next"] == pytest.approx(28.5)
+    assert out.loc["p2", "vegas_implied_delta_next"] == pytest.approx(8.0)
+    assert out.loc["p1", "hc_changed_next"] == 0.0   # Smith → Smith
+    assert out.loc["p2", "hc_changed_next"] == 1.0   # Jones → Newguy
+    # no 2019 data → hc_changed unknown
+    assert np.isnan(out.loc["p1", "hc_changed"])
+
+
+def test_schedule_context_degrades_gracefully():
+    from features.schedule_context import SCHEDULE_CONTEXT_FEATURES, add_schedule_context_features
+
+    fm = pd.DataFrame([{"player_id": "p1", "season": 2020, "team": "AAA",
+                        "fpts_per_game": 10.0}])
+    out = add_schedule_context_features(fm, schedules=pd.DataFrame())
+    for c in SCHEDULE_CONTEXT_FEATURES:
+        assert c in out.columns and out[c].isna().all()
